@@ -203,9 +203,18 @@ jobs:
               echo '# CONFIG_CCACHE is not set'
             fi
           } > "$RUNNER_TEMP/ci.config"
+          # CONFIG_FEED_<name>=m for every feed the download server does not
+          # host: base-files then writes its distfeeds.list line commented out.
+          bash "$GITHUB_WORKSPACE/scripts/distfeeds-config.sh" . > "$RUNNER_TEMP/distfeeds.config"
+          cat "$RUNNER_TEMP/distfeeds.config"
           bash "$GITHUB_WORKSPACE/scripts/compose-config.sh" .config \
-            "$GITHUB_WORKSPACE/r5s.config" "$RUNNER_TEMP/ci.config"
+            "$GITHUB_WORKSPACE/r5s.config" "$RUNNER_TEMP/ci.config" "$RUNNER_TEMP/distfeeds.config"
           make defconfig
+          missing=0
+          while IFS= read -r line; do
+            grep -qxF -- "$line" .config || { echo "::error::$line did not survive make defconfig"; missing=1; }
+          done < "$RUNNER_TEMP/distfeeds.config"
+          [ "$missing" -eq 0 ]
           # Fails on missing BTF/netkit/devcrypto/chrony/mosdns/kmods, on
           # busybox ntpd, on any removed package or Argon (=y or =m), on honk not being
           # exactly =m, and on packages installed from the wrong feed.
@@ -265,6 +274,9 @@ jobs:
           vmlinux="$(dirname "$kernel_config")/vmlinux"
           readelf -S --wide "$vmlinux" | grep -q '\.BTF' \
             || { echo "::error::no .BTF section in $vmlinux"; exit 1; }
+          # Every enabled apk repository of the image must exist on the
+          # download server (404 fails, timeouts only warn).
+          bash "$GITHUB_WORKSPACE/scripts/check-distfeeds.sh" "$rootfs"
           ls "$TARGET_DIR_REL"/*"$DEVICE"*sysupgrade.img.gz
 
       - name: Verify honk packages

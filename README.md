@@ -215,6 +215,20 @@ fills in the rest. `scripts/check-config.sh` enforces the spec twice:
    removed or honk ones, and the rootfs has no `sysntpd` / `ntpd` / honk / Argon, has the
    chrony servers, sbwml's mosdns files, the GPU row files and the Vantage theme files.
 
+## apk repositories
+
+With `CONFIG_PER_FEED_REPO` (the default), base-files writes one line per feed to
+`/etc/apk/repositories.d/distfeeds.list`, but the ImmortalWrt download server hosts only
+`packages`, `luci`, `routing` and `telephony` (plus the target and `base` repositories);
+`video`, `mosdns`, `daeuniverse` and `vantage` are 404 and would break `apk update`.
+`scripts/distfeeds-config.sh` prints `CONFIG_FEED_<name>=m` for every feed not in
+`DISTFEEDS_HOSTED` (default `packages luci routing telephony`), which makes upstream write
+that line commented out. CI merges it before `make defconfig` and checks that it survived.
+After the build `scripts/check-distfeeds.sh` probes every line of the image's file: an
+enabled repository answering 403/404/410 fails the run, a timeout or 5xx only warns, and a
+commented-out repository that answers 200 warns (add it to `DISTFEEDS_HOSTED`). Run
+`bash scripts/test-distfeeds.sh` (needs network) after changing either script.
+
 ## CI
 
 `.github/workflows/build.yml`, run manually (Actions -> Build R5S firmware -> Run workflow):
@@ -225,9 +239,9 @@ fills in the rest. `scripts/check-config.sh` enforces the spec twice:
 4. Runs `scripts/prepare-feeds.sh` (feeds update/install, mosdns, vmlinux-btf, honk sources,
    vantage, `feeds.lock.txt`), installs honk's Rust toolchains, then runs the feed-patch tests and
    `apply-feed-patches.sh` (strict).
-5. Configures and checks (see above), runs `make download`, then
+5. Configures and checks (see above, and the apk repositories), runs `make download`, then
    `make world IGNORE_ERRORS=m`. On failure it retries the failed package once with `V=s`.
-6. Verifies the outputs and uploads the sysupgrade images, manifest, `*.buildinfo`,
+6. Verifies the outputs (including `check-distfeeds.sh`) and uploads the sysupgrade images, manifest, `*.buildinfo`,
    `sha256sums`, `profiles.json`, `diffconfig`, `feeds.lock.txt`, `build.log` and
    `build-info.txt`; the honk apks go to their own artifact. The full packages artifact is
    optional.
@@ -246,7 +260,8 @@ bash scripts/install-overlay.sh immortalwrt
 bash scripts/prepare-feeds.sh immortalwrt --lock feeds.lock.txt
 cd immortalwrt
 FEED_PATCHES_STRICT=1 bash scripts/apply-feed-patches.sh
-bash ../scripts/compose-config.sh .config ../r5s.config
+bash ../scripts/distfeeds-config.sh . > distfeeds.config
+bash ../scripts/compose-config.sh .config ../r5s.config distfeeds.config
 make defconfig
 bash ../scripts/check-config.sh --config .config --tree .
 make download -j8
