@@ -3,10 +3,12 @@
 # Enforce the firmware spec on the resolved build config and on build outputs.
 #
 # Usage:
-#   bash scripts/check-config.sh --config <.config>
+#   bash scripts/check-config.sh --config <.config> [--tree <dir>]
 #        [--kernel-config <linux .config>] [--manifest <file>]... [--rootfs <dir>]
 #
 #   --config         The top-level .config after `make defconfig` (required).
+#   --tree           The ImmortalWrt tree: checks which feed each package is
+#                    installed from (package/feeds/<feed>/<package>).
 #   --kernel-config  The kernel .config from build_dir/.../linux-*/.config.
 #   --manifest       An image manifest ("name - version" per line).
 #   --rootfs         The staged root filesystem (build_dir/.../root-rockchip).
@@ -20,6 +22,7 @@
 set -Eeuo pipefail
 
 config=""
+tree=""
 kernel_config=""
 rootfs=""
 manifests=()
@@ -27,10 +30,11 @@ manifests=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--config) config="${2:?}"; shift 2 ;;
+	--tree) tree="${2:?}"; shift 2 ;;
 	--kernel-config) kernel_config="${2:?}"; shift 2 ;;
 	--manifest) manifests+=("${2:?}"); shift 2 ;;
 	--rootfs) rootfs="${2:?}"; shift 2 ;;
-	-h | --help) sed -n '2,18p' "$0"; exit 0 ;;
+	-h | --help) sed -n '2,21p' "$0"; exit 0 ;;
 	*) echo "check-config: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -76,8 +80,23 @@ required_y=(
 
 # Packages that must be built into the image (=y, not =m).
 required_pkgs=(
+	# ImmortalWrt release "tweak" set (not default on master)
+	luci
+	autocore
+	default-settings-chn
+	luci-app-cpufreq
+	# time sync
 	chrony
 	luci-app-chrony
+	luci-i18n-chrony-zh-cn
+	# DNS
+	dnsmasq-full
+	mosdns
+	luci-app-mosdns
+	luci-i18n-mosdns-zh-cn
+	geo2txt
+	v2ray-geoip
+	v2ray-geosite
 	mount-utils
 	kmod-veth
 	kmod-nft-queue
@@ -97,12 +116,28 @@ forbidden_y=(
 	CONFIG_KERNEL_DEBUG_INFO_REDUCED
 	CONFIG_BUSYBOX_CONFIG_NTPD
 	CONFIG_BUSYBOX_CONFIG_FEATURE_NTPD_SERVER
+	CONFIG_PACKAGE_dnsmasq
 )
 
+# Packages that must be built as installable .apk files but stay out of the
+# image: exactly =m.
+module_pkgs=(
+	honk
+	luci-app-honk
+	vmlinux-btf-builtin
+)
+
+# Never in the image (=y) nor in a manifest; =m is fine. Extended regex,
+# matched against the whole package name.
+not_in_image_re='(honk|luci-app-honk|luci-lib-daeuniverse|luci-i18n-daeuniverse-.*|luci-i18n-honk-.*|vmlinux-btf|vmlinux-btf-builtin)'
+
 # Removed packages: neither in the image (=y) nor built as a package (=m).
-# Extended regex, matched against the whole package name. honk is listed on
-# purpose: it is installed later from the daeuniverse feed.
-forbidden_pkg_re='(ddns-scripts(-.*)?|ddns-go|luci-app-ddns|luci-app-ddns-go|lucky|luci-app-lucky|zerotier|luci-app-zerotier|wechatpush|luci-app-wechatpush|pushbot|luci-app-pushbot|vlmcsd|luci-app-vlmcsd|luci-i18n-(ddns|ddns-go|lucky|zerotier|wechatpush|pushbot|vlmcsd)-.*|honk|luci-app-honk|luci-i18n-honk-.*)'
+# Extended regex, matched against the whole package name. vmlinux-btf (the
+# prebuilt-blob package) cannot build here, so it must not even be =m.
+forbidden_pkg_re='(ddns-scripts(-.*)?|ddns-go|luci-app-ddns|luci-app-ddns-go|lucky|luci-app-lucky|zerotier|luci-app-zerotier|wechatpush|luci-app-wechatpush|pushbot|luci-app-pushbot|vlmcsd|luci-app-vlmcsd|luci-i18n-(ddns|ddns-go|lucky|zerotier|wechatpush|pushbot|vlmcsd)-.*|chrony-nts|vmlinux-btf)'
+
+# The NTP servers 100-cn-ntp-servers.patch puts in /etc/config/chrony.
+chrony_servers=(ntp.tencent.com ntp1.aliyun.com ntp.ntsc.ac.cn cn.ntp.org.cn)
 
 need_file "$config"
 
@@ -120,6 +155,36 @@ done
 while IFS= read -r line; do
 	err "$config: removed package is selected: $line"
 done < <(grep -E "^CONFIG_PACKAGE_${forbidden_pkg_re}=[ym]$" "$config" || true)
+for pkg in "${module_pkgs[@]}"; do
+	has_line "CONFIG_PACKAGE_$pkg=m" "$config" || err "$config: CONFIG_PACKAGE_$pkg=m is missing (built as .apk, not in the image)"
+done
+while IFS= read -r line; do
+	err "$config: must not be in the image: $line"
+done < <(grep -E "^CONFIG_PACKAGE_${not_in_image_re}=y$" "$config" || true)
+
+# --- Feed sources -----------------------------------------------------------
+
+if [[ -n "$tree" ]]; then
+	[[ -d "$tree/package/feeds" ]] || { echo "check-config: no package/feeds in $tree" >&2; exit 2; }
+	# package:feed it must be installed from, and from no other feed.
+	for spec in mosdns:mosdns luci-app-mosdns:mosdns geo2txt:mosdns \
+		honk:daeuniverse luci-app-honk:daeuniverse vmlinux-btf-builtin:daeuniverse; do
+		pkg="${spec%%:*}"
+		feed="${spec#*:}"
+		[[ -f "$tree/package/feeds/$feed/$pkg/Makefile" ]] ||
+			err "tree: $pkg is not installed from feed '$feed'"
+		for other in "$tree"/package/feeds/*/"$pkg"; do
+			if [[ -e "$other" && "$other" != "$tree/package/feeds/$feed/$pkg" ]]; then
+				err "tree: $pkg is also installed from ${other#"$tree"/}"
+			fi
+		done
+	done
+	for other in "$tree"/package/feeds/*/vmlinux-btf; do
+		if [[ -e "$other" ]]; then err "tree: ${other#"$tree"/} is installed (needs a prebuilt blob)"; fi
+	done
+	[[ -f "$tree/feeds/daeuniverse/honk/src/Cargo.toml" ]] ||
+		err "tree: honk sources are missing (feeds/daeuniverse/honk/src)"
+fi
 
 # --- Kernel .config ---------------------------------------------------------
 
@@ -166,6 +231,9 @@ for manifest in ${manifests[@]+"${manifests[@]}"}; do
 	while IFS= read -r pkg; do
 		err "$manifest: removed package is in the image: $pkg"
 	done < <(grep -xE -- "$forbidden_pkg_re" <<<"$names" || true)
+	while IFS= read -r pkg; do
+		err "$manifest: $pkg must not be in the image (installable .apk only)"
+	done < <(grep -xE -- "$not_in_image_re" <<<"$names" || true)
 done
 
 # --- Root filesystem --------------------------------------------------------
@@ -180,6 +248,53 @@ if [[ -n "$rootfs" ]]; then
 	[[ -x "$rootfs/etc/init.d/chronyd" ]] || err "rootfs: /etc/init.d/chronyd is missing"
 	[[ -f "$rootfs/etc/ssl/modules.cnf.d/devcrypto.cnf" ]] ||
 		err "rootfs: /etc/ssl/modules.cnf.d/devcrypto.cnf is missing (OpenSSL devcrypto engine)"
+
+	# chrony: the Chinese servers of 100-cn-ntp-servers.patch, no default
+	# pool, no NTS.
+	chrony_conf="$rootfs/etc/config/chrony"
+	if [[ -f "$chrony_conf" ]]; then
+		for server in "${chrony_servers[@]}"; do
+			grep -qF -- "option hostname '$server'" "$chrony_conf" ||
+				err "rootfs: /etc/config/chrony lacks server $server (chrony feed patch not applied?)"
+		done
+		if grep -qE '^config pool' "$chrony_conf"; then
+			err "rootfs: /etc/config/chrony still has the default pool"
+		fi
+		if grep -qE "^[[:space:]]*option nts '1'" "$chrony_conf"; then
+			err "rootfs: /etc/config/chrony enables NTS"
+		fi
+	else
+		err "rootfs: /etc/config/chrony is missing"
+	fi
+
+	# mosdns: sbwml's luci-app-mosdns owns the UCI config and the init script;
+	# the packages feed's mosdns ships a different, non-UCI init script.
+	[[ -x "$rootfs/usr/bin/mosdns" ]] || err "rootfs: /usr/bin/mosdns is missing"
+	[[ -f "$rootfs/etc/config/mosdns" ]] || err "rootfs: /etc/config/mosdns is missing (sbwml mosdns)"
+	if [[ -x "$rootfs/etc/init.d/mosdns" ]]; then
+		grep -qF 'mosdns.config.configfile' "$rootfs/etc/init.d/mosdns" ||
+			err "rootfs: /etc/init.d/mosdns is not sbwml's (packages feed mosdns?)"
+	else
+		err "rootfs: /etc/init.d/mosdns is missing (sbwml mosdns)"
+	fi
+
+	# honk must not be in the image.
+	for path in usr/bin/honk-core etc/init.d/honk etc/config/honk; do
+		if [[ -e "$rootfs/$path" ]]; then err "rootfs: /$path is present (honk must not be in the image)"; fi
+	done
+
+	# GPU row: files/ overlay plus the luci-mod-status feed patch.
+	[[ -x "$rootfs/sbin/gpuinfo" ]] || err "rootfs: /sbin/gpuinfo is missing or not executable (files/ overlay)"
+	[[ -f "$rootfs/usr/share/rpcd/ucode/gpuinfo" ]] || err "rootfs: /usr/share/rpcd/ucode/gpuinfo is missing (files/ overlay)"
+	[[ -f "$rootfs/usr/share/rpcd/acl.d/luci-mod-status-gpuinfo.json" ]] ||
+		err "rootfs: /usr/share/rpcd/acl.d/luci-mod-status-gpuinfo.json is missing (files/ overlay)"
+	sys_js="$rootfs/www/luci-static/resources/view/status/include/10_system.js"
+	if [[ -f "$sys_js" ]]; then
+		grep -qF 'luci.gpuinfo' "$sys_js" || err "rootfs: 10_system.js has no GPU row (luci feed patch not applied?)"
+	else
+		err "rootfs: /www/luci-static/resources/view/status/include/10_system.js is missing (luci-mod-status)"
+	fi
+	[[ -x "$rootfs/sbin/cpuinfo" ]] || err "rootfs: /sbin/cpuinfo is missing (autocore)"
 fi
 
 if ((errors)); then
@@ -187,4 +302,4 @@ if ((errors)); then
 	exit 1
 fi
 n_manifests=${#manifests[@]}
-echo "check-config: OK (${config}${kernel_config:+, kernel}, ${n_manifests} manifest(s)${rootfs:+, rootfs})"
+echo "check-config: OK (${config}${tree:+, tree}${kernel_config:+, kernel}, ${n_manifests} manifest(s)${rootfs:+, rootfs})"

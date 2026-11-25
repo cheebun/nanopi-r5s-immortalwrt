@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+// rpcd ucode plugin "luci.gpuinfo": the GPU row of LuCI's Status -> Overview
+// (patches/feeds/luci/.../include/100-gpu-row.patch). ImmortalWrt's autocore
+// and luci-base already provide the CPU rows; this only adds the GPU line, in
+// its own ubus object so no file owned by a package is modified.
+
+'use strict';
+
+import { access, popen } from 'fs';
+
+const GPUINFO = '/sbin/gpuinfo';
+
+const methods = {
+	// Trimmed stdout of /sbin/gpuinfo. Any failure, or a board without a GPU,
+	// yields an empty string, which hides the row.
+	getGPUInfo: {
+		call: function() {
+			let out = '';
+
+			if (access(GPUINFO, 'x')) {
+				const fd = popen(GPUINFO, 'r');
+
+				if (fd) {
+					out = trim(fd.read('all') ?? '');
+					fd.close();
+				}
+			}
+
+			return { gpuinfo: out };
+		}
+	}
+};
+
+return { 'luci.gpuinfo': methods };

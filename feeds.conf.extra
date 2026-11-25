@@ -1,0 +1,15 @@
+# Feeds added on top of ImmortalWrt's feeds.conf.default.
+# (scripts/feeds rejects a bare "#" line, so there are none in this file.)
+# scripts/install-overlay.sh writes <tree>/feeds.conf as feeds.conf.default
+# followed by this file; scripts/prepare-feeds.sh then updates and installs
+# them. Neither feed is pinned: the commits used by a build are recorded in
+# feeds.lock.txt (a feeds.conf with every feed pinned to "^<commit>").
+
+# sbwml's mosdns v5, luci-app-mosdns and geo2txt. Its mosdns replaces
+# feeds/packages/net/mosdns, which prepare-feeds.sh deletes before install.
+src-git mosdns https://github.com/sbwml/luci-app-mosdns.git;v5
+
+# daeuniverse: honk, luci-app-honk, luci-lib-daeuniverse and
+# vmlinux-btf-builtin, built as modules (=m) and shipped as separate .apk
+# files, never in the image. honk's sources are cloned by prepare-feeds.sh.
+src-git daeuniverse https://github.com/daeuniverse/openwrt-packages.git;main

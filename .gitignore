@@ -30,3 +30,8 @@
 *.key
 *.pem
 key-build*
+
+# CI work directories and local feed locks
+/out/
+/honk/
+/feeds.lock.txt

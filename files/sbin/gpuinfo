@@ -1,0 +1,79 @@
+#!/bin/sh
+# gpuinfo - one-line GPU summary for the LuCI Status -> Overview "GPU" row.
+# Called by the rpcd ucode plugin luci.gpuinfo (/usr/share/rpcd/ucode/gpuinfo).
+# Example output:
+#   Mali-G52 (200MHz, 43.8°C)
+# Model: Mali kbase "gpuinfo" -> device tree compatible -> "GPU". The mainline
+# panfrost driver of this kernel has no kbase gpuinfo, so on the R5S the model
+# comes from the device tree ("Mali Bifrost").
+# Prints nothing when there is no GPU node, no GPU devfreq and no GPU thermal
+# zone; LuCI then hides the row.
+
+DT_BASE=/sys/firmware/devicetree/base
+THERMAL_PATH=/sys/class/thermal
+
+# GPU devfreq device (e.g. /sys/class/devfreq/fde60000.gpu).
+devfreq=""
+for d in /sys/class/devfreq/*gpu*; do
+	[ -r "$d/cur_freq" ] && { devfreq="$d"; break; }
+done
+
+# Model, priority 1: the Mali kbase "gpuinfo" sysfs file, e.g.
+# "Mali-G52 1 cores r1p0 0x07040002" -> "Mali-G52".
+model=""
+for g in /sys/devices/platform/*.gpu/gpuinfo ${devfreq:+"$devfreq/device/gpuinfo"}; do
+	[ -r "$g" ] || continue
+	line="$(head -n1 "$g" 2>/dev/null)"
+	model="$(printf '%s\n' "$line" | sed -n 's/^\(.*[^[:space:]]\)[[:space:]]\{1,\}[0-9]\{1,\}[[:space:]]\{1,\}cores.*$/\1/p')"
+	[ -n "$model" ] || model="${line%% *}"
+	[ -n "$model" ] && break
+done
+
+# Model, priority 2: the device tree GPU node "compatible" property.
+node=""
+for n in ${devfreq:+"$devfreq/device/of_node"} "$DT_BASE"/gpu@* "$DT_BASE"/*/gpu@*; do
+	[ -r "$n/compatible" ] && { node="$n"; break; }
+done
+if [ -z "$model" ] && [ -n "$node" ]; then
+	compat="$(tr '\0' '\n' < "$node/compatible" 2>/dev/null)"
+	case "$compat" in
+	*arm,mali-bifrost*) model="Mali Bifrost" ;;
+	*arm,mali-valhall*) model="Mali Valhall" ;;
+	*arm,mali-midgard*) model="Mali Midgard" ;;
+	*)
+		# Second part of the first (most specific) compatible: "vendor,name" -> "name".
+		first="$(printf '%s\n' "$compat" | head -n1)"
+		model="${first#*,}"
+		;;
+	esac
+fi
+
+# Current GPU frequency in MHz (devfreq reports Hz).
+freq=""
+if [ -n "$devfreq" ]; then
+	f="$(cat "$devfreq/cur_freq" 2>/dev/null)"
+	case "$f" in
+	''|*[!0-9]*) ;;
+	*) freq="$(awk -v hz="$f" 'BEGIN { printf("%.0fMHz", hz / 1000000) }')" ;;
+	esac
+fi
+
+# Temperature of the thermal zone typed "gpu-thermal".
+temp=""
+for z in "$THERMAL_PATH"/thermal_zone*; do
+	[ "$(cat "$z/type" 2>/dev/null)" = "gpu-thermal" ] || continue
+	temp="$(awk '$1 ~ /^-?[0-9]+$/ { printf("%.1f°C", $1 / 1000) }' "$z/temp" 2>/dev/null)"
+	[ -n "$temp" ] && break
+done
+
+# Nothing at all: no output.
+[ -n "$model$node$freq$temp" ] || exit 0
+[ -n "$model" ] || model="GPU"
+
+out="$model"
+if [ -n "$freq" ] && [ -n "$temp" ]; then
+	out="$out ($freq, $temp)"
+elif [ -n "$freq$temp" ]; then
+	out="$out ($freq$temp)"
+fi
+printf '%s\n' "$out"
