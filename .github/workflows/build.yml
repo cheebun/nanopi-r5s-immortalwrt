@@ -1,0 +1,280 @@
+name: Build R5S firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_ref:
+        description: ImmortalWrt tag or branch to build (release tags pin the feeds)
+        required: true
+        default: v25.12.2
+        type: string
+      use_ccache:
+        description: Use and save the ccache cache
+        required: true
+        default: true
+        type: boolean
+      upload_packages:
+        description: Also upload bin/ packages (kmods for this kernel) as an artifact
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMMORTALWRT_REPO: https://github.com/immortalwrt/immortalwrt.git
+  IMMORTALWRT_REF: ${{ inputs.immortalwrt_ref }}
+  TARGET_DIR_REL: bin/targets/rockchip/armv8
+  DEVICE: friendlyarm_nanopi-r5s
+  CCACHE_MAXSIZE: 3G
+  TZ: UTC
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # GitHub-hosted jobs are killed at 6 h; stop a little earlier so the
+    # always() steps can still save caches and logs.
+    timeout-minutes: 345
+    steps:
+      - name: Validate inputs
+        run: |
+          if [[ ! "$IMMORTALWRT_REF" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+            echo "::error::invalid immortalwrt_ref: $IMMORTALWRT_REF"
+            exit 1
+          fi
+          case "$IMMORTALWRT_REF" in
+            v25.12.*|openwrt-25.12) ;;
+            *) echo "::warning::$IMMORTALWRT_REF is not a 25.12 ref; r5s.config targets 25.12" ;;
+          esac
+
+      - name: Free disk space
+        run: |
+          df -h / /mnt 2>/dev/null || df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft /opt/google
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          sudo apt-get clean
+          df -h / /mnt 2>/dev/null || df -h /
+
+      - name: Pick build volume
+        run: |
+          # Some runners have a larger scratch disk on /mnt. Build on whichever
+          # filesystem has more free space; a BTF build needs ~45 GB.
+          root_free=$(df --output=avail -B1G / | tail -1 | tr -d ' ')
+          mnt_free=0
+          if mountpoint -q /mnt; then
+            mnt_free=$(df --output=avail -B1G /mnt | tail -1 | tr -d ' ')
+          fi
+          if (( mnt_free > root_free )); then
+            sudo mkdir -p /mnt/work
+            sudo chown "$(id -u):$(id -g)" /mnt/work
+            build_root=/mnt/work
+          else
+            build_root="$RUNNER_TEMP/work"
+            mkdir -p "$build_root"
+          fi
+          echo "Free: / ${root_free}G, /mnt ${mnt_free}G -> $build_root"
+          if (( (mnt_free > root_free ? mnt_free : root_free) < 40 )); then
+            echo "::warning::less than 40 GB free; the build may run out of disk"
+          fi
+          {
+            echo "BUILD_ROOT=$build_root"
+            echo "TREE=$build_root/immortalwrt"
+            echo "CCACHE_DIR_PATH=$build_root/ccache"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout overlay
+        uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git \
+            libncurses-dev libssl-dev libelf-dev zlib1g-dev python3 python3-dev python3-setuptools \
+            python3-pyelftools swig rsync unzip zstd file wget curl xxd cpio pkgconf ccache \
+            dwarves
+          # pahole for BTF. The build also compiles its own host dwarves
+          # (CONFIG_DWARVES, selected by KERNEL_DEBUG_INFO_BTF); this one is
+          # for ad-hoc checks and as a fallback on PATH.
+          pahole --version
+
+      - name: Checkout ImmortalWrt
+        run: |
+          git clone --depth 1 --branch "$IMMORTALWRT_REF" "$IMMORTALWRT_REPO" "$TREE"
+          git -C "$TREE" log -1 --format='ImmortalWrt %H (%cs) %s'
+          echo "IMMORTALWRT_SHA=$(git -C "$TREE" rev-parse HEAD)" >> "$GITHUB_ENV"
+          # Release tags pin every feed to a commit (src-git ...^<sha>).
+          cat "$TREE/feeds.conf.default"
+
+      - name: Install overlay
+        run: bash scripts/install-overlay.sh "$TREE"
+
+      - name: Restore dl cache
+        id: dl-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.TREE }}/dl
+          key: dl-${{ inputs.immortalwrt_ref }}-${{ hashFiles('r5s.config') }}
+          restore-keys: |
+            dl-${{ inputs.immortalwrt_ref }}-
+            dl-
+
+      - name: Restore ccache
+        if: inputs.use_ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR_PATH }}
+          key: ccache-${{ inputs.immortalwrt_ref }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.immortalwrt_ref }}-
+            ccache-
+
+      - name: Update and install feeds
+        working-directory: ${{ env.TREE }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply feed patches
+        working-directory: ${{ env.TREE }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/test-apply-feed-patches.sh"
+          FEED_PATCHES_STRICT=1 bash scripts/apply-feed-patches.sh
+
+      - name: Configure
+        working-directory: ${{ env.TREE }}
+        env:
+          USE_CCACHE: ${{ inputs.use_ccache }}
+        run: |
+          # CI-only options; device and package choices live in r5s.config.
+          {
+            echo 'CONFIG_DEVEL=y'
+            echo 'CONFIG_BUILD_LOG=y'
+            if [ "$USE_CCACHE" = "true" ]; then
+              echo 'CONFIG_CCACHE=y'
+              echo "CONFIG_CCACHE_DIR=\"$CCACHE_DIR_PATH\""
+            else
+              echo '# CONFIG_CCACHE is not set'
+            fi
+          } > "$RUNNER_TEMP/ci.config"
+          bash "$GITHUB_WORKSPACE/scripts/compose-config.sh" .config \
+            "$GITHUB_WORKSPACE/r5s.config" "$RUNNER_TEMP/ci.config"
+          make defconfig
+          # Fails on missing BTF/netkit/devcrypto/chrony/kmods, on busybox
+          # ntpd, and on any removed package (=y or =m).
+          bash "$GITHUB_WORKSPACE/scripts/check-config.sh" --config .config
+          ./scripts/diffconfig.sh > "$RUNNER_TEMP/diffconfig"
+          cat "$RUNNER_TEMP/diffconfig"
+
+      - name: Download sources
+        working-directory: ${{ env.TREE }}
+        run: |
+          make download -j8 || make download -j1 V=s
+          # Truncated downloads are a classic cause of late build failures.
+          find dl -type f -size -1024c -print -delete
+          du -sh dl
+
+      - name: Build firmware
+        working-directory: ${{ env.TREE }}
+        run: |
+          echo "Building with $(nproc) jobs"
+          make -j"$(nproc)" world 2>&1 | tee build.log
+
+      - name: Verbose retry of the failed package
+        if: failure()
+        working-directory: ${{ env.TREE }}
+        run: |
+          [ -f build.log ] || exit 0
+          # subdir.mk prints e.g. "ERROR: package/feeds/luci/luci-app-chrony failed to build."
+          failed=$(sed -n 's/.*ERROR: \([^ ]*\) failed to build.*/\1/p' build.log | head -1)
+          if [ -n "$failed" ]; then
+            echo "=== Rebuilding $failed with V=s ==="
+            make "$failed/compile" V=s -j1 2>&1 | tee build-verbose.log || true
+            grep -nE "error:|Error [0-9]|FAILED|Patch failed|No rule to make target" build-verbose.log | head -40 || true
+          else
+            echo "No failing package found in build.log"
+            tail -150 build.log
+          fi
+
+      - name: Verify build outputs
+        working-directory: ${{ env.TREE }}
+        run: |
+          kernel_config=$(ls -1 build_dir/target-*/linux-rockchip_armv8/linux-[0-9]*/.config 2>/dev/null | head -1)
+          rootfs=$(find build_dir -mindepth 2 -maxdepth 2 -type d -name 'root-rockchip*' -print -quit)
+          test -n "$kernel_config" || { echo "::error::kernel .config not found"; exit 1; }
+          test -n "$rootfs" || { echo "::error::staged rootfs not found"; exit 1; }
+          manifest_args=()
+          while IFS= read -r -d '' m; do manifest_args+=(--manifest "$m"); done \
+            < <(find "$TARGET_DIR_REL" -maxdepth 1 -name '*.manifest' -print0)
+          (( ${#manifest_args[@]} )) || { echo "::error::no image manifest found"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/check-config.sh" --config .config \
+            --kernel-config "$kernel_config" --rootfs "$rootfs" "${manifest_args[@]}"
+          # The kernel must actually carry a .BTF section, not just the option.
+          vmlinux="$(dirname "$kernel_config")/vmlinux"
+          readelf -S --wide "$vmlinux" | grep -q '\.BTF' \
+            || { echo "::error::no .BTF section in $vmlinux"; exit 1; }
+          ls "$TARGET_DIR_REL"/*"$DEVICE"*sysupgrade.img.gz
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          out="$GITHUB_WORKSPACE/out"
+          mkdir -p "$out"
+          t="$TREE/$TARGET_DIR_REL"
+          shopt -s nullglob
+          for f in "$t"/*"$DEVICE"*sysupgrade.img.gz "$t"/*.manifest "$t"/config.buildinfo \
+                   "$t"/feeds.buildinfo "$t"/version.buildinfo "$t"/sha256sums "$t"/profiles.json \
+                   "$TREE"/build.log "$TREE"/build-verbose.log "$RUNNER_TEMP"/diffconfig; do
+            cp -- "$f" "$out/"
+          done
+          {
+            echo "overlay_commit=$GITHUB_SHA"
+            echo "immortalwrt_ref=$IMMORTALWRT_REF"
+            echo "immortalwrt_commit=${IMMORTALWRT_SHA:-unknown}"
+            echo "run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$out/build-info.txt"
+          if [ -d "$TREE/logs" ] && [ ! -f "$t/sha256sums" ]; then
+            tar -C "$TREE" -czf "$out/logs.tar.gz" logs
+          fi
+          ls -la "$out"
+          df -h "$BUILD_ROOT"
+
+      - name: Upload firmware
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: r5s-firmware-${{ inputs.immortalwrt_ref }}-${{ github.run_number }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload packages
+        if: success() && inputs.upload_packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: r5s-packages-${{ inputs.immortalwrt_ref }}-${{ github.run_number }}
+          path: |
+            ${{ env.TREE }}/bin/targets/rockchip/armv8/packages/
+            ${{ env.TREE }}/bin/packages/
+          retention-days: 7
+
+      - name: Save dl cache
+        if: always() && steps.dl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.TREE }}/dl
+          key: dl-${{ inputs.immortalwrt_ref }}-${{ hashFiles('r5s.config') }}
+
+      - name: Save ccache
+        if: always() && inputs.use_ccache
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR_PATH }}
+          key: ccache-${{ inputs.immortalwrt_ref }}-${{ github.run_id }}

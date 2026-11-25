@@ -1,0 +1,32 @@
+# Local ImmortalWrt checkout used by the build steps in README.md
+/immortalwrt/
+
+# Build outputs and caches if a build is run from the repository root
+/bin/
+/build_dir/
+/staging_dir/
+/dl/
+/tmp/
+/logs/
+/.ccache/
+/.config
+/.config.old
+/output/
+
+# Patch tooling leftovers
+*.orig
+*.rej
+
+# Editors and OS
+.DS_Store
+.*.swp
+*~
+.vscode*
+.idea/
+
+# Never commit secrets or signing keys
+.env
+.env.*
+*.key
+*.pem
+key-build*
