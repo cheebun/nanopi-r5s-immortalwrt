@@ -31,6 +31,11 @@
 #      luci feeds, which come first; none of them is selected.
 #   5. honk's package Makefile builds from ./src next to it, which the feed does
 #      not ship. Clone the upstream tag the Makefile names (HONK_GIT_TAG).
+#   6. vantage (checked after step 4, with the mosdns and daeuniverse links):
+#      the theme, the dashboard and the traffic add-on must be installed
+#      from the vantage feed. No other feed ships them today;
+#      should the luci feed ever add one, it would win (it comes first) and
+#      this check fails instead of silently building another version.
 #
 # Idempotent: re-running updates the feeds again and repeats every step.
 
@@ -90,6 +95,7 @@ expect_link() {
 }
 for pkg in mosdns luci-app-mosdns geo2txt; do expect_link mosdns "$pkg"; done
 for pkg in honk luci-app-honk luci-lib-daeuniverse vmlinux-btf-builtin; do expect_link daeuniverse "$pkg"; done
+for pkg in luci-theme-vantage luci-app-vantage luci-app-vantage-traffic; do expect_link vantage "$pkg"; done
 [[ ! -e package/feeds/packages/mosdns ]] || die "mosdns from the packages feed is still installed"
 for f in package/feeds/*/vmlinux-btf; do
 	[[ ! -e "$f" ]] || die "vmlinux-btf is still installed ($f)"

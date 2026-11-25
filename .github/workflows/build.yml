@@ -207,7 +207,7 @@ jobs:
             "$GITHUB_WORKSPACE/r5s.config" "$RUNNER_TEMP/ci.config"
           make defconfig
           # Fails on missing BTF/netkit/devcrypto/chrony/mosdns/kmods, on
-          # busybox ntpd, on any removed package (=y or =m), on honk not being
+          # busybox ntpd, on any removed package or Argon (=y or =m), on honk not being
           # exactly =m, and on packages installed from the wrong feed.
           bash "$GITHUB_WORKSPACE/scripts/check-config.sh" --config .config --tree .
           ./scripts/diffconfig.sh > "$RUNNER_TEMP/diffconfig"

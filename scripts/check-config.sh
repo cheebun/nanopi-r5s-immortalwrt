@@ -97,6 +97,14 @@ required_pkgs=(
 	geo2txt
 	v2ray-geoip
 	v2ray-geosite
+	# LuCI theme: Vantage (vantage feed), Bootstrap as the fallback
+	luci-theme-vantage
+	luci-i18n-vantage-theme-zh-cn
+	luci-app-vantage
+	luci-i18n-vantage-zh-cn
+	luci-app-vantage-traffic
+	luci-i18n-vantage-traffic-zh-cn
+	luci-theme-bootstrap
 	mount-utils
 	kmod-veth
 	kmod-nft-queue
@@ -134,7 +142,10 @@ not_in_image_re='(honk|luci-app-honk|luci-lib-daeuniverse|luci-i18n-daeuniverse-
 # Removed packages: neither in the image (=y) nor built as a package (=m).
 # Extended regex, matched against the whole package name. vmlinux-btf (the
 # prebuilt-blob package) cannot build here, so it must not even be =m.
-forbidden_pkg_re='(ddns-scripts(-.*)?|ddns-go|luci-app-ddns|luci-app-ddns-go|lucky|luci-app-lucky|zerotier|luci-app-zerotier|wechatpush|luci-app-wechatpush|pushbot|luci-app-pushbot|vlmcsd|luci-app-vlmcsd|luci-i18n-(ddns|ddns-go|lucky|zerotier|wechatpush|pushbot|vlmcsd)-.*|chrony-nts|vmlinux-btf)'
+# Vantage replaces Argon (luci-app-argon-config is the name Argon provides,
+# its translations are luci-i18n-argon-config-*); the Vantage access-point
+# pairing add-on is not wanted either.
+forbidden_pkg_re='(ddns-scripts(-.*)?|ddns-go|luci-app-ddns|luci-app-ddns-go|lucky|luci-app-lucky|zerotier|luci-app-zerotier|wechatpush|luci-app-wechatpush|pushbot|luci-app-pushbot|vlmcsd|luci-app-vlmcsd|luci-i18n-(ddns|ddns-go|lucky|zerotier|wechatpush|pushbot|vlmcsd)-.*|chrony-nts|vmlinux-btf|luci-theme-argon|luci-app-argon-config|luci-i18n-argon-config-.*|luci-app-vantage-aps|luci-i18n-vantage-aps-.*)'
 
 # The NTP servers 100-cn-ntp-servers.patch puts in /etc/config/chrony.
 chrony_servers=(ntp.tencent.com ntp1.aliyun.com ntp.ntsc.ac.cn cn.ntp.org.cn)
@@ -168,7 +179,8 @@ if [[ -n "$tree" ]]; then
 	[[ -d "$tree/package/feeds" ]] || { echo "check-config: no package/feeds in $tree" >&2; exit 2; }
 	# package:feed it must be installed from, and from no other feed.
 	for spec in mosdns:mosdns luci-app-mosdns:mosdns geo2txt:mosdns \
-		honk:daeuniverse luci-app-honk:daeuniverse vmlinux-btf-builtin:daeuniverse; do
+		honk:daeuniverse luci-app-honk:daeuniverse vmlinux-btf-builtin:daeuniverse \
+		luci-theme-vantage:vantage luci-app-vantage:vantage luci-app-vantage-traffic:vantage; do
 		pkg="${spec%%:*}"
 		feed="${spec#*:}"
 		[[ -f "$tree/package/feeds/$feed/$pkg/Makefile" ]] ||
@@ -295,6 +307,32 @@ if [[ -n "$rootfs" ]]; then
 		err "rootfs: /www/luci-static/resources/view/status/include/10_system.js is missing (luci-mod-status)"
 	fi
 	[[ -x "$rootfs/sbin/cpuinfo" ]] || err "rootfs: /sbin/cpuinfo is missing (autocore)"
+
+	# LuCI theme: Vantage from its package plus files/ (99-vantage selects it,
+	# the menu override moves Status back in front of the dashboard); no Argon.
+	for path in www/luci-static/vantage/vantage.css \
+		usr/share/ucode/luci/template/themes/vantage/header.ut \
+		etc/uci-defaults/30_luci-theme-vantage \
+		www/luci-static/bootstrap/cascade.css; do
+		[[ -f "$rootfs/$path" ]] || err "rootfs: /$path is missing (luci-theme-vantage / luci-theme-bootstrap)"
+	done
+	vantage_defaults="$rootfs/etc/uci-defaults/99-vantage"
+	if [[ -x "$vantage_defaults" ]]; then
+		grep -qF '/luci-static/vantage' "$vantage_defaults" ||
+			err "rootfs: /etc/uci-defaults/99-vantage does not select /luci-static/vantage"
+	else
+		err "rootfs: /etc/uci-defaults/99-vantage is missing or not executable (files/ overlay)"
+	fi
+	landing="$rootfs/usr/share/luci/menu.d/zz-landing-override.json"
+	if [[ -f "$landing" ]]; then
+		python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$landing" 2>/dev/null ||
+			err "rootfs: /usr/share/luci/menu.d/zz-landing-override.json is not valid JSON"
+	else
+		err "rootfs: /usr/share/luci/menu.d/zz-landing-override.json is missing (files/ overlay)"
+	fi
+	for path in etc/uci-defaults/30_luci-theme-argon www/luci-static/argon etc/config/argon; do
+		if [[ -e "$rootfs/$path" ]]; then err "rootfs: /$path is present (Argon must not be in the image)"; fi
+	done
 fi
 
 if ((errors)); then

@@ -20,7 +20,8 @@ the Brightspeed XR1710G ImmortalWrt repository.
 ## master branch caveats
 
 - **Snapshot, not a release.** master moves daily. The feeds in `feeds.conf.default` are not
-  pinned, and neither are the two extra feeds. Every build records the exact commits of the
+  pinned, and neither are the mosdns and daeuniverse feeds (only the vantage theme feed is
+  pinned, to its v1.2.0 commit). Every build records the exact commits of the
   main tree, every feed and honk's sources in `feeds.lock.txt` (also copied into
   `build-info.txt`). `feeds.lock.txt` is a valid `feeds.conf`: copy it over
   `<tree>/feeds.conf` after `install-overlay.sh` to rebuild the same feeds.
@@ -42,6 +43,8 @@ the Brightspeed XR1710G ImmortalWrt repository.
 - `dnsmasq-full`, sbwml's `mosdns` + `luci-app-mosdns` (+ zh-cn), `geo2txt`,
   `v2ray-geoip`, `v2ray-geosite`.
 - A GPU row on Status -> Overview (see below).
+- The Vantage LuCI theme, its dashboard and its per-device traffic add-on (+ zh-cn), as the
+  default theme, with Bootstrap as the fallback (see below).
 - Kernel modules `kmod-veth`, `kmod-nft-queue`, `kmod-nfnetlink-queue`, `kmod-xdp-sockets-diag`.
 - `mount-utils` (util-linux `mount`, `umount`, `findmnt`, ...).
 - Kernel BTF debug info and netkit.
@@ -58,6 +61,8 @@ the Brightspeed XR1710G ImmortalWrt repository.
 - busybox `ntpd` and the `sysntpd` init script, which busybox installs only when its NTPD
   applet is enabled. `chrony-nts` is not selected.
 - `luci-app-attendedsysupgrade` / `owut`: an attended sysupgrade would install a stock image.
+- Argon (`luci-theme-argon`, `luci-app-argon-config`): replaced by Vantage. It is not in the
+  master image anyway; CI fails if it is selected or in the image.
 
 **Built but not in the image:** honk, `luci-app-honk`, `luci-lib-daeuniverse` and
 `vmlinux-btf-builtin`, as `.apk` files in a separate artifact.
@@ -133,6 +138,30 @@ after "Architecture", e.g. `Mali Bifrost (400MHz, 43.8°C)`:
 `scripts/install-overlay.sh` copies `files/` to `<tree>/files/`, which the buildroot copies
 over the root filesystem of every image.
 
+## LuCI theme: Vantage
+
+[Vantage](https://github.com/anothaDev/luci-theme-vantage) (GPL-3.0-or-later) comes from its
+own source feed, pinned to the v1.2.0 release commit in `feeds.conf.extra`
+(`src-git vantage https://github.com/anothaDev/luci-theme-vantage.git^a7ff63b7...`).
+`r5s.config` selects `luci-theme-vantage`, `luci-app-vantage` (dashboard),
+`luci-app-vantage-traffic` (per-device traffic of hosts behind a shared port) and their zh-cn
+translations (`luci-i18n-vantage-theme-zh-cn`, `luci-i18n-vantage-zh-cn`,
+`luci-i18n-vantage-traffic-zh-cn`), plus `luci-theme-bootstrap` as the fallback.
+`luci-app-vantage-aps` (access-point pairing over SSH) and Argon are not selected, and CI fails
+if they are.
+
+- `files/etc/uci-defaults/99-vantage` registers the theme (`luci.themes.Vantage`) and sets
+  `luci.main.mediaurlbase=/luci-static/vantage` on the first boot of every new image, so a
+  sysupgrade also switches back to Vantage. It then sets these appearance preferences in
+  `/etc/config/vantage_theme`, each only when it is unset, so choices saved on the router are
+  kept: `theme light`, `brand hostname`, `login grid`, `unfocused still`, `chart lanes`,
+  `path full` and a `layout_wide_wired` dashboard layout.
+- `files/usr/share/luci/menu.d/zz-landing-override.json` sets `admin/status` to `order 2`.
+- `prepare-feeds.sh` and `check-config.sh --tree` check that the three packages are installed
+  from the vantage feed. After the build `check-config.sh` checks the image for the theme's
+  stylesheet, header template and `30_luci-theme-vantage`, for Bootstrap, for `99-vantage`
+  and a valid menu override, and for the absence of Argon's files.
+
 ## honk
 
 honk (daeuniverse) needs Linux 6.12+, raw BTF (`/sys/kernel/btf/vmlinux`), cgroup v2 +
@@ -179,12 +208,12 @@ options (ccache, build logs). Later fragments win, one line per key. Then `make 
 fills in the rest. `scripts/check-config.sh` enforces the spec twice:
 
 1. After `make defconfig`: the required symbols and packages are `=y`, honk is exactly `=m`,
-   no removed package is `=y`/`=m`, and (`--tree`) mosdns and honk are installed from the
-   right feeds.
+   no removed package is `=y`/`=m`, and (`--tree`) mosdns, honk and Vantage are installed
+   from the right feeds.
 2. After the build: the kernel `.config` has every BPF/BTF/netkit/NFQUEUE option, `vmlinux`
    carries a `.BTF` section, the image manifest has the required packages and none of the
-   removed or honk ones, and the rootfs has no `sysntpd` / `ntpd` / honk, has the chrony
-   servers, sbwml's mosdns files and the GPU row files.
+   removed or honk ones, and the rootfs has no `sysntpd` / `ntpd` / honk / Argon, has the
+   chrony servers, sbwml's mosdns files, the GPU row files and the Vantage theme files.
 
 ## CI
 
@@ -194,7 +223,7 @@ fills in the rest. `scripts/check-config.sh` enforces the spec twice:
 2. Installs the build dependencies, `dwarves`, and clang/LLVM for honk.
 3. Clones ImmortalWrt at the chosen ref (default `master`) and installs the overlay.
 4. Runs `scripts/prepare-feeds.sh` (feeds update/install, mosdns, vmlinux-btf, honk sources,
-   `feeds.lock.txt`), installs honk's Rust toolchains, then runs the feed-patch tests and
+   vantage, `feeds.lock.txt`), installs honk's Rust toolchains, then runs the feed-patch tests and
    `apply-feed-patches.sh` (strict).
 5. Configures and checks (see above), runs `make download`, then
    `make world IGNORE_ERRORS=m`. On failure it retries the failed package once with `V=s`.
@@ -240,6 +269,8 @@ row. Run `bash scripts/test-apply-feed-patches.sh` after changing the apply scri
 - honk OpenWrt packages: <https://github.com/daeuniverse/openwrt-packages> (`honk/Makefile`,
   `honk/build.sh`, `vmlinux-btf-builtin/Makefile`, `.github/workflows/build-vmlinux-btf.yml`)
 - mosdns feed: <https://github.com/sbwml/luci-app-mosdns/tree/v5>
+- Vantage feed: <https://github.com/anothaDev/luci-theme-vantage> (v1.2.0,
+  `a7ff63b715bca51effb5ab2d488dfff6cff1b16a`)
 - chrony patch: the XR1710G build's `patches/feeds/packages/net/chrony/100-cn-ntp-servers.patch`
 
 ## License
