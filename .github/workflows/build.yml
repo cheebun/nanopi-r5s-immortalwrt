@@ -35,7 +35,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.ref }}
+  # Per host: self-hosted and GitHub-hosted builds share no caches or disk.
+  group: build-${{ github.ref }}-${{ inputs.runner == 'github' && 'github' || 'self-hosted' }}
   cancel-in-progress: false
 
 env:
