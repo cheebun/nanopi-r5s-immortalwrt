@@ -231,9 +231,12 @@ commented-out repository that answers 200 warns (add it to `DISTFEEDS_HOSTED`). 
 
 ## CI
 
-`.github/workflows/build.yml`, run manually (Actions -> Build R5S firmware -> Run workflow):
+`.github/workflows/build.yml`, run manually (Actions -> Build R5S firmware -> Run workflow).
+It builds on the self-hosted runner by default (see below); choose `runner: github` for a
+GitHub-hosted runner:
 
-1. Frees runner disk space and builds on the larger of `/` and `/mnt`.
+1. GitHub-hosted: frees runner disk space and builds on the larger of `/` and `/mnt`.
+   Self-hosted: checks free disk and starts the build container.
 2. Installs the build dependencies, `dwarves`, and clang/LLVM for honk.
 3. Clones ImmortalWrt at the chosen ref (default `master`) and installs the overlay.
 4. Runs `scripts/prepare-feeds.sh` (feeds update/install, mosdns, vmlinux-btf, honk sources,
@@ -246,13 +249,40 @@ commented-out repository that answers 200 warns (add it to `DISTFEEDS_HOSTED`). 
    `build-info.txt`; the honk apks go to their own artifact. The full packages artifact is
    optional.
 
-`dl/` and ccache are cached with `actions/cache/restore` and `actions/cache/save`. ccache is
+On GitHub-hosted runners `dl/` and ccache are cached with `actions/cache/restore` and `actions/cache/save`. ccache is
 saved even when the build fails; `dl/` (key prefix `dl-v2-`) is saved only when "Build
 firmware" succeeded. After `make download`, `scripts/clean-dl.sh` deletes truncated
 downloads (under 1 KiB) from the top level of `dl/` only: `dl/go-mod-cache` holds small Go
 sources, and deleting them broke mosdns while Go still saw the modules as present. The
 `dl-v2-` prefix keeps caches saved with that damage from being restored. Run
 `bash scripts/test-dl-cleanup.sh` (offline; CI runs it too) after changing the script.
+
+## Self-hosted runner
+
+The build job runs on a self-hosted Linux x86_64 runner with the labels
+`self-hosted, Linux, X64, r5s-builder`, unless the run is started with `runner: github`
+(use that when the self-hosted machine is off; the job otherwise waits in the queue).
+
+- Who can run it: the workflow has only the `workflow_dispatch` trigger, and the job runs
+  only in this repository and only when the repository owner both started it and (for
+  re-runs) re-triggered it. Do not add `pull_request` or `pull_request_target` triggers to a
+  job that can land on the self-hosted runner. Permissions are `contents: read`.
+- Container: the runner checks out the overlay and runs the actions (checkout, artifacts) on
+  the host. Every other step runs through `scripts/ci-shell.sh`, which `docker exec`s it in
+  a throwaway `ubuntu:24.04` container as the runner's own uid (packages are installed as
+  root inside the container only). The container mounts the runner's work directory and the
+  cache directory at their host paths, has no Docker socket, and is removed at the end of the
+  job, also after a failure or a cancel.
+- Caches: `dl/` and ccache live in a persistent directory on the runner machine
+  (`/srv/openwrt-cache/r5s` by default, override with the repository variable
+  `R5S_CACHE_DIR`), with subdirectories `dl` and `ccache` owned by the runner user. Create
+  them once as root: `install -d -o <runner-user> -g <runner-user> <dir>/dl <dir>/ccache`.
+  `scripts/clean-dl.sh` still runs on the persistent `dl/`. The GitHub Actions caches are not
+  used on the self-hosted runner.
+- Disk: each run clones ImmortalWrt fresh, needs at least 60 GB free (checked at the start)
+  and deletes the tree at the end.
+- Machine requirements: Docker usable by the runner user, network access to GitHub, the
+  ImmortalWrt download servers and the Ubuntu archive.
 
 ## Local build
 
