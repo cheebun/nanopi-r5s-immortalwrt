@@ -246,7 +246,13 @@ commented-out repository that answers 200 warns (add it to `DISTFEEDS_HOSTED`). 
    `build-info.txt`; the honk apks go to their own artifact. The full packages artifact is
    optional.
 
-`dl/` and ccache are cached with `actions/cache` and saved even when the build fails.
+`dl/` and ccache are cached with `actions/cache/restore` and `actions/cache/save`. ccache is
+saved even when the build fails; `dl/` (key prefix `dl-v2-`) is saved only when "Build
+firmware" succeeded. After `make download`, `scripts/clean-dl.sh` deletes truncated
+downloads (under 1 KiB) from the top level of `dl/` only: `dl/go-mod-cache` holds small Go
+sources, and deleting them broke mosdns while Go still saw the modules as present. The
+`dl-v2-` prefix keeps caches saved with that damage from being restored. Run
+`bash scripts/test-dl-cleanup.sh` (offline; CI runs it too) after changing the script.
 
 ## Local build
 

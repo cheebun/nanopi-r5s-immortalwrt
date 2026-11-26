@@ -126,10 +126,12 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.TREE }}/dl
-          key: dl-${{ inputs.immortalwrt_ref }}-${{ hashFiles('r5s.config') }}
+          # v2: older dl- caches contain a go-mod-cache damaged by the old
+          # cleanup (small Go sources deleted); never restore them.
+          key: dl-v2-${{ inputs.immortalwrt_ref }}-${{ hashFiles('r5s.config') }}
           restore-keys: |
-            dl-${{ inputs.immortalwrt_ref }}-
-            dl-
+            dl-v2-${{ inputs.immortalwrt_ref }}-
+            dl-v2-
 
       - name: Restore ccache
         if: inputs.use_ccache
@@ -227,10 +229,13 @@ jobs:
         run: |
           make download -j8 || make download -j1 V=s
           # Truncated downloads are a classic cause of late build failures.
-          find dl -type f -size -1024c -print -delete
+          # Top level only: dl/go-mod-cache holds small Go sources that must stay.
+          bash "$GITHUB_WORKSPACE/scripts/test-dl-cleanup.sh"
+          bash "$GITHUB_WORKSPACE/scripts/clean-dl.sh" dl
           du -sh dl
 
       - name: Build firmware
+        id: build
         working-directory: ${{ env.TREE }}
         run: |
           echo "Building with $(nproc) jobs"
@@ -313,9 +318,13 @@ jobs:
           shopt -s nullglob
           for f in "$t"/*"$DEVICE"*sysupgrade.img.gz "$t"/*.manifest "$t"/config.buildinfo \
                    "$t"/feeds.buildinfo "$t"/version.buildinfo "$t"/sha256sums "$t"/profiles.json \
-                   "$TREE"/build.log "$TREE"/build-verbose.log "$RUNNER_TEMP"/diffconfig; do
+                   "$TREE"/build.log "$RUNNER_TEMP"/diffconfig; do
             cp -- "$f" "$out/"
           done
+          # Only written when the verbose retry found a failed package.
+          if [ -f "$TREE/build-verbose.log" ]; then
+            cp -- "$TREE/build-verbose.log" "$out/"
+          fi
           {
             echo "overlay_commit=$GITHUB_SHA"
             echo "immortalwrt_ref=$IMMORTALWRT_REF"
@@ -364,11 +373,12 @@ jobs:
           retention-days: 7
 
       - name: Save dl cache
-        if: always() && steps.dl-cache.outputs.cache-hit != 'true'
+        # Only after a successful firmware build, so a damaged dl/ is never cached.
+        if: always() && steps.build.outcome == 'success' && steps.dl-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: ${{ env.TREE }}/dl
-          key: dl-${{ inputs.immortalwrt_ref }}-${{ hashFiles('r5s.config') }}
+          key: dl-v2-${{ inputs.immortalwrt_ref }}-${{ hashFiles('r5s.config') }}
 
       - name: Save ccache
         if: always() && inputs.use_ccache
