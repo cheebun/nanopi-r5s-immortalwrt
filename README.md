@@ -1,21 +1,38 @@
 # ImmortalWrt master for FriendlyElec NanoPi R5S
 
-A custom [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) build from the `master`
-branch (Linux 6.18 on rockchip) for the FriendlyElec NanoPi R5S (Rockchip RK3568, target
+A custom [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) `master` build (Linux 6.18
+on rockchip, from our fork's `base` branch, see [Source tree](#source-tree)) for the FriendlyElec NanoPi R5S (Rockchip RK3568, target
 `rockchip/armv8`, profile `friendlyarm_nanopi-r5s`), built by GitHub Actions.
 
 This repository is an **overlay**, not a fork. It holds only the device config, the extra
-feeds, the feed patches, a few rootfs files and the tooling. CI checks out pristine
+feeds, the feed patches, a few rootfs files and the tooling. CI checks out unmodified
 ImmortalWrt and installs the overlay into it. The layout and the feed-patch mechanism follow
 the Brightspeed XR1710G ImmortalWrt repository.
 
 | Item | Value |
 |------|-------|
-| Upstream | ImmortalWrt `master` (default workflow input) |
-| Kernel | Linux 6.18 (`KERNEL_PATCHVER:=6.18`; 6.18.60 when this was written) |
+| Source | [`cheebun/immortalwrt`](https://github.com/cheebun/immortalwrt) branch `base`, pinned to `d3a7aaedf7` |
+| Kernel | Linux 6.18 (`KERNEL_PATCHVER:=6.18`; 6.18.64 at the pinned commit) |
 | Target / profile | `rockchip/armv8` / `friendlyarm_nanopi-r5s` (device package: `kmod-r8125`) |
 | Package arch | `aarch64_generic` |
 | Images | `*-friendlyarm_nanopi-r5s-squashfs-sysupgrade.img.gz`, `*-ext4-sysupgrade.img.gz` |
+
+## Source tree
+
+CI builds [`cheebun/immortalwrt`](https://github.com/cheebun/immortalwrt), branch `base`:
+ImmortalWrt `master` plus a merge of the newer OpenWrt 6.18 kernel (see `.github/FORK.md`
+there). The workflow pins a commit, not the branch, so a build is reproducible: input
+`immortalwrt_repo` defaults to `cheebun/immortalwrt` and `immortalwrt_ref` to
+`d3a7aaedf7c0763584c9958d5dbee31380bc0d74`.
+
+- **Bump:** set the `immortalwrt_ref` default in `.github/workflows/build.yml` to the new head
+  of `base` (`gh api repos/cheebun/immortalwrt/commits/base --jq .sha`).
+- **Upstream master instead:** run the workflow with `immortalwrt_repo: immortalwrt/immortalwrt`
+  and `immortalwrt_ref: master` (any branch, tag or full 40-hex SHA works).
+
+`scripts/fetch-immortalwrt.sh` validates both inputs, fetches exactly that one commit and, for
+a SHA, checks that it got it; the commit and kernel version go to the job summary and
+`build-info.txt`. Run `bash scripts/test-fetch-immortalwrt.sh` (offline) after changing it.
 
 ## master branch caveats
 
@@ -238,7 +255,8 @@ GitHub-hosted runner:
 1. GitHub-hosted: frees runner disk space and builds on the larger of `/` and `/mnt`.
    Self-hosted: checks free disk and starts the build container.
 2. Installs the build dependencies, `dwarves`, and clang/LLVM for honk.
-3. Clones ImmortalWrt at the chosen ref (default `master`) and installs the overlay.
+3. Fetches ImmortalWrt at the chosen repo and ref (default: the pinned `base` commit of our
+   fork, see [Source tree](#source-tree)) and installs the overlay.
 4. Runs `scripts/prepare-feeds.sh` (feeds update/install, mosdns, vmlinux-btf, honk sources,
    vantage, `feeds.lock.txt`), installs honk's Rust toolchains, then runs the feed-patch tests and
    `apply-feed-patches.sh` (strict).
@@ -291,7 +309,7 @@ plus rustup with the toolchains in `feeds/daeuniverse/honk/src/rust-toolchain.to
 `crates/honk-ebpf/rust-toolchain.toml` and `bpf-linker` (see the workflow) for honk.
 
 ```sh
-git clone --depth 1 --branch master https://github.com/immortalwrt/immortalwrt.git immortalwrt
+bash scripts/fetch-immortalwrt.sh cheebun/immortalwrt d3a7aaedf7c0763584c9958d5dbee31380bc0d74 immortalwrt
 bash scripts/install-overlay.sh immortalwrt
 bash scripts/prepare-feeds.sh immortalwrt --lock feeds.lock.txt
 cd immortalwrt
@@ -311,7 +329,7 @@ row. Run `bash scripts/test-apply-feed-patches.sh` after changing the apply scri
 
 ## Sources
 
-- ImmortalWrt master: `target/linux/rockchip/Makefile` (`KERNEL_PATCHVER:=6.18`),
+- ImmortalWrt master (via the fork's `base` branch): `target/linux/rockchip/Makefile` (`KERNEL_PATCHVER:=6.18`),
   `target/linux/rockchip/image/armv8.mk`, `include/target.mk` (tweak packages),
   `config/Config-kernel.in`, `package/utils/busybox/`, `package/libs/openssl/Config.in`,
   `package/emortal/autocore`, `scripts/feeds`, `scripts/package-metadata.pl` (virtual

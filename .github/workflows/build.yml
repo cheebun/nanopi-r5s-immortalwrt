@@ -15,10 +15,16 @@ on:
         options:
           - self-hosted
           - github
-      immortalwrt_ref:
-        description: ImmortalWrt branch or tag to build (master = kernel 6.18; feeds are recorded in feeds.lock.txt)
+      immortalwrt_repo:
+        description: ImmortalWrt GitHub repository (owner/name); default is our fork
         required: true
-        default: master
+        default: cheebun/immortalwrt
+        type: string
+      immortalwrt_ref:
+        # Bump: set this to the new head of the fork's base branch.
+        description: ImmortalWrt commit SHA (40 hex) or branch/tag; default = pinned head of the fork's base branch (kernel 6.18)
+        required: true
+        default: d3a7aaedf7c0763584c9958d5dbee31380bc0d74
         type: string
       use_ccache:
         description: Use and save the ccache cache
@@ -40,7 +46,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMMORTALWRT_REPO: https://github.com/immortalwrt/immortalwrt.git
+  # owner/name and SHA or branch/tag; validated by scripts/fetch-immortalwrt.sh.
+  IMMORTALWRT_REPO: ${{ inputs.immortalwrt_repo }}
   IMMORTALWRT_REF: ${{ inputs.immortalwrt_ref }}
   TARGET_DIR_REL: bin/targets/rockchip/armv8
   DEVICE: friendlyarm_nanopi-r5s
@@ -79,14 +86,13 @@ jobs:
 
       - name: Validate inputs
         run: |
-          if [[ ! "$IMMORTALWRT_REF" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-            echo "::error::invalid immortalwrt_ref: $IMMORTALWRT_REF"
-            exit 1
+          bash scripts/test-fetch-immortalwrt.sh
+          bash scripts/fetch-immortalwrt.sh --dry-run "$IMMORTALWRT_REPO" "$IMMORTALWRT_REF" immortalwrt
+          if [[ "$IMMORTALWRT_REPO" != cheebun/immortalwrt ]]; then
+            echo "::warning::building from $IMMORTALWRT_REPO; r5s.config and the feed patches target the base branch of cheebun/immortalwrt"
           fi
-          case "$IMMORTALWRT_REF" in
-            master) ;;
-            *) echo "::warning::$IMMORTALWRT_REF is not master; r5s.config and the feed patches target master" ;;
-          esac
+          # Artifact names must not contain "/" (branch names may).
+          echo "IMMORTALWRT_REF_LABEL=${IMMORTALWRT_REF//\//-}" >> "$GITHUB_ENV"
 
       - name: Free disk space
         if: env.BUILD_HOST == 'github'
@@ -216,12 +222,25 @@ jobs:
 
       - name: Checkout ImmortalWrt
         run: |
-          git clone --depth 1 --branch "$IMMORTALWRT_REF" "$IMMORTALWRT_REPO" "$TREE"
-          git -C "$TREE" log -1 --format='ImmortalWrt %H (%cs) %s'
-          echo "IMMORTALWRT_SHA=$(git -C "$TREE" rev-parse HEAD)" >> "$GITHUB_ENV"
+          # Validates again, fetches exactly one commit (retried), asserts a SHA
+          # ref, and exports IMMORTALWRT_SHA.
+          bash scripts/fetch-immortalwrt.sh "$IMMORTALWRT_REPO" "$IMMORTALWRT_REF" "$TREE"
+          sha=$(git -C "$TREE" rev-parse HEAD)
           kernel=$(sed -n 's/^KERNEL_PATCHVER:=//p' "$TREE/target/linux/rockchip/Makefile")
-          echo "Kernel for rockchip: $kernel ($(sed -n 's/^LINUX_VERSION-\(.*\) = \(.*\)/\1\2/p' "$TREE/target/linux/generic/kernel-$kernel" 2>/dev/null))"
+          [ -n "$kernel" ] || { echo "::error::no KERNEL_PATCHVER in target/linux/rockchip/Makefile"; exit 1; }
+          sub=$(sed -n "s/^LINUX_VERSION-${kernel//./\\.} = *//p" "$TREE/target/linux/generic/kernel-$kernel" 2>/dev/null || true)
+          echo "Kernel for rockchip: $kernel${sub:+ ($kernel$sub)}"
           echo "KERNEL_PATCHVER=$kernel" >> "$GITHUB_ENV"
+          {
+            echo "### ImmortalWrt source"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Repository | \`$IMMORTALWRT_REPO\` |"
+            echo "| Ref | \`$IMMORTALWRT_REF\` |"
+            echo "| Commit | \`$sha\` |"
+            echo "| Kernel | \`$kernel$sub\` (KERNEL_PATCHVER $kernel) |"
+          } >> "$GITHUB_STEP_SUMMARY"
           # master does not pin its feeds; prepare-feeds.sh records the commits.
           cat "$TREE/feeds.conf.default"
 
@@ -442,6 +461,7 @@ jobs:
           fi
           {
             echo "overlay_commit=$GITHUB_SHA"
+            echo "immortalwrt_repo=$IMMORTALWRT_REPO"
             echo "immortalwrt_ref=$IMMORTALWRT_REF"
             echo "immortalwrt_commit=${IMMORTALWRT_SHA:-unknown}"
             echo "kernel_patchver=${KERNEL_PATCHVER:-unknown}"
@@ -463,7 +483,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: r5s-firmware-${{ inputs.immortalwrt_ref }}-${{ github.run_number }}
+          name: r5s-firmware-${{ env.IMMORTALWRT_REF_LABEL }}-${{ github.run_number }}
           path: out/
           if-no-files-found: warn
           retention-days: 30
@@ -472,7 +492,7 @@ jobs:
         if: always() && steps.honk.outcome != 'skipped' && hashFiles('honk/*') != ''
         uses: actions/upload-artifact@v7
         with:
-          name: r5s-honk-apks-${{ inputs.immortalwrt_ref }}-${{ github.run_number }}
+          name: r5s-honk-apks-${{ env.IMMORTALWRT_REF_LABEL }}-${{ github.run_number }}
           path: honk/
           if-no-files-found: warn
           retention-days: 30
@@ -481,7 +501,7 @@ jobs:
         if: success() && inputs.upload_packages
         uses: actions/upload-artifact@v7
         with:
-          name: r5s-packages-${{ inputs.immortalwrt_ref }}-${{ github.run_number }}
+          name: r5s-packages-${{ env.IMMORTALWRT_REF_LABEL }}-${{ github.run_number }}
           path: |
             ${{ env.TREE }}/bin/targets/rockchip/armv8/packages/
             ${{ env.TREE }}/bin/packages/
