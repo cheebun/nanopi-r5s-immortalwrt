@@ -10,11 +10,6 @@
 # feeds/packages/net/mosdns, which prepare-feeds.sh deletes before install.
 src-git mosdns https://github.com/sbwml/luci-app-mosdns.git;v5
 
-# daeuniverse: honk, luci-app-honk, luci-lib-daeuniverse and
-# vmlinux-btf-builtin, built as modules (=m) and shipped as separate .apk
-# files, never in the image. honk's sources are cloned by prepare-feeds.sh.
-src-git daeuniverse https://github.com/daeuniverse/openwrt-packages.git;main
-
 # anothaDev's Vantage LuCI theme (GPL-3.0-or-later): luci-theme-vantage,
 # luci-app-vantage (dashboard), luci-app-vantage-traffic and
 # luci-app-vantage-aps (not selected). Pinned to the v1.2.0 release commit.

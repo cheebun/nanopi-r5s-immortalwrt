@@ -87,6 +87,7 @@ jobs:
       - name: Validate inputs
         run: |
           bash scripts/test-fetch-immortalwrt.sh
+          bash scripts/test-check-config.sh
           bash scripts/fetch-immortalwrt.sh --dry-run "$IMMORTALWRT_REPO" "$IMMORTALWRT_REF" immortalwrt
           if [[ "$IMMORTALWRT_REPO" != cheebun/immortalwrt ]]; then
             echo "::warning::building from $IMMORTALWRT_REPO; r5s.config and the feed patches target the base branch of cheebun/immortalwrt"
@@ -185,7 +186,6 @@ jobs:
           docker run -d --name "$name" --label r5s-build --init \
             --user "$(id -u):$(id -g)" --security-opt no-new-privileges \
             -e HOME=/home/builder -e LANG=C.UTF-8 \
-            -e PATH=/home/builder/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             -v "$work_root:$work_root" -v "$SELF_HOSTED_CACHE:$SELF_HOSTED_CACHE" \
             "$BUILD_IMAGE" sleep infinity
           docker exec -u 0 "$name" install -d -o "$(id -u)" -g "$(id -g)" /home/builder
@@ -212,9 +212,7 @@ jobs:
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git \
             libncurses-dev libssl-dev libelf-dev zlib1g-dev python3 python3-dev python3-setuptools \
             python3-pyelftools swig rsync unzip zstd file wget curl xxd cpio pkgconf ccache \
-            dwarves llvm libclang-dev libbpf-dev cmake "${extra[@]}"
-          # llvm/libclang/libbpf/cmake: honk (Rust + eBPF + BoringSSL), see
-          # "Install honk toolchains".
+            dwarves "${extra[@]}"
           # pahole for BTF. The build also compiles its own host dwarves
           # (CONFIG_DWARVES, selected by KERNEL_DEBUG_INFO_BTF); this one is
           # for ad-hoc checks and as a fallback on PATH.
@@ -274,43 +272,10 @@ jobs:
 
       - name: Update and install feeds
         run: |
-          # Also resolves the mosdns conflict, uninstalls vmlinux-btf, clones
-          # honk's sources and writes the feed lock (see the script).
+          # Also resolves the mosdns conflict, checks the vantage feed and
+          # writes the feed lock (see the script).
           mkdir -p out
           bash scripts/prepare-feeds.sh "$TREE" --lock out/feeds.lock.txt
-
-      - name: Install honk toolchains
-        # Without these only the honk apks fail (IGNORE_ERRORS=m), not the
-        # firmware; "Verify honk packages" then reports it.
-        continue-on-error: true
-        run: |
-          # honk (built as =m) needs the Rust toolchains its sources pin and
-          # the pinned bpf-linker, as in daeuniverse/openwrt-packages' own
-          # workflow. rustup is preinstalled on GitHub's Ubuntu images.
-          src="$TREE/feeds/daeuniverse/honk/src"
-          stable=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$src/rust-toolchain.toml")
-          nightly=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$src/crates/honk-ebpf/rust-toolchain.toml")
-          [ -n "$stable" ] && [ -n "$nightly" ] || { echo "::error::cannot read honk's Rust toolchains"; exit 1; }
-          if ! command -v rustup >/dev/null; then
-            curl -fsSL --retry 3 https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-          fi
-          # Install everything the rust-toolchain.toml files list, so rustup never
-          # has to auto-install a component in the middle of the package build.
-          rustup toolchain install "$stable" --profile minimal --component rustfmt,clippy \
-            --target aarch64-unknown-linux-musl
-          rustup toolchain install "$nightly" --profile minimal --component rust-src,llvm-tools
-          # shellcheck disable=SC1091
-          . "$src/.github/ci/pins.env"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/bpf-linker.tar.zst" \
-            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
-          echo "${BPF_LINKER_SHA256}  $RUNNER_TEMP/bpf-linker.tar.zst" | sha256sum -c -
-          cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-          mkdir -p "$cargo_bin"
-          zstd -dc "$RUNNER_TEMP/bpf-linker.tar.zst" | tar -xf - -C "$cargo_bin"
-          "$cargo_bin/bpf-linker" --version
-          rustup toolchain list
 
       - name: Apply feed patches
         working-directory: ${{ env.TREE }}
@@ -348,9 +313,10 @@ jobs:
             grep -qxF -- "$line" .config || { echo "::error::$line did not survive make defconfig"; missing=1; }
           done < "$RUNNER_TEMP/distfeeds.config"
           [ "$missing" -eq 0 ]
-          # Fails on missing BTF/netkit/devcrypto/chrony/mosdns/kmods, on
-          # busybox ntpd, on any removed package or Argon (=y or =m), on honk not being
-          # exactly =m, and on packages installed from the wrong feed.
+          # Fails on missing BTF/netkit/devcrypto/chrony/mosdns/kmods or honk
+          # runtime deps, on busybox ntpd, on any removed package, Argon or
+          # honk package (=y or =m), on packages installed from the wrong feed,
+          # and on a daeuniverse feed.
           bash "$GITHUB_WORKSPACE/scripts/check-config.sh" --config .config --tree .
           ./scripts/diffconfig.sh > "$RUNNER_TEMP/diffconfig"
           cat "$RUNNER_TEMP/diffconfig"
@@ -370,11 +336,8 @@ jobs:
         working-directory: ${{ env.TREE }}
         run: |
           echo "Building with $(nproc) jobs"
-          # IGNORE_ERRORS=m: a failure in a package built only as a module
-          # (the honk apks) does not stop the firmware; "Verify honk packages"
-          # reports it afterwards.
           set -o pipefail
-          make -j"$(nproc)" world IGNORE_ERRORS=m 2>&1 | tee build.log
+          make -j"$(nproc)" world 2>&1 | tee build.log
 
       - name: Verbose retry of the failed package
         if: failure()
@@ -382,8 +345,7 @@ jobs:
         run: |
           [ -f build.log ] || exit 0
           # subdir.mk prints e.g. "ERROR: package/feeds/luci/luci-app-chrony failed to build."
-          # Ignored (=m) failures of the daeuniverse packages are skipped here.
-          failed=$(sed -n 's/.*ERROR: \([^ ]*\) failed to build.*/\1/p' build.log | grep -v '/daeuniverse/' | head -1 || true)
+          failed=$(sed -n 's/.*ERROR: \([^ ]*\) failed to build.*/\1/p' build.log | head -1 || true)
           if [ -n "$failed" ]; then
             echo "=== Rebuilding $failed with V=s ==="
             make "$failed/compile" V=s -j1 2>&1 | tee build-verbose.log || true
@@ -414,31 +376,6 @@ jobs:
           # download server (404 fails, timeouts only warn).
           bash "$GITHUB_WORKSPACE/scripts/check-distfeeds.sh" "$rootfs"
           ls "$TARGET_DIR_REL"/*"$DEVICE"*sysupgrade.img.gz
-
-      - name: Verify honk packages
-        id: honk
-        if: success()
-        working-directory: ${{ env.TREE }}
-        run: |
-          # The firmware is fine at this point; this only checks that the honk
-          # apks (=m, never in the image) were produced.
-          mkdir -p "$GITHUB_WORKSPACE/honk"
-          missing=0
-          for name in honk luci-app-honk luci-lib-daeuniverse vmlinux-btf-builtin; do
-            found=$(find bin/packages -name "${name}-[0-9]*.apk" -print -quit)
-            if [ -n "$found" ]; then
-              cp -- "$found" "$GITHUB_WORKSPACE/honk/"
-            else
-              echo "::error::no ${name} .apk was built"
-              missing=1
-            fi
-          done
-          find bin/packages -name 'luci-i18n-daeuniverse-*.apk' -exec cp -- {} "$GITHUB_WORKSPACE/honk/" \;
-          if [ -d logs/package/feeds/daeuniverse ]; then
-            tar -C logs/package/feeds -czf "$GITHUB_WORKSPACE/honk/daeuniverse-logs.tar.gz" daeuniverse
-          fi
-          (cd "$GITHUB_WORKSPACE/honk" && ls -la && sha256sum -- *.apk > sha256sums 2>/dev/null || true)
-          exit "$missing"
 
       - name: Collect artifacts
         if: always()
@@ -488,15 +425,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload honk packages
-        if: always() && steps.honk.outcome != 'skipped' && hashFiles('honk/*') != ''
-        uses: actions/upload-artifact@v7
-        with:
-          name: r5s-honk-apks-${{ env.IMMORTALWRT_REF_LABEL }}-${{ github.run_number }}
-          path: honk/
-          if-no-files-found: warn
-          retention-days: 30
-
       - name: Upload packages
         if: success() && inputs.upload_packages
         uses: actions/upload-artifact@v7
@@ -532,6 +460,6 @@ jobs:
           if [[ -n "${BUILD_CONTAINER:-}" ]]; then
             docker rm -f "$BUILD_CONTAINER"
           fi
-          rm -rf -- "${BUILD_ROOT:-$RUNNER_TEMP/work}" "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/honk"
+          rm -rf -- "${BUILD_ROOT:-$RUNNER_TEMP/work}" "$GITHUB_WORKSPACE/out"
           df -h "$RUNNER_TEMP" "$SELF_HOSTED_CACHE"
           du -sh "$SELF_HOSTED_CACHE"/* 2>/dev/null || true

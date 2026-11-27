@@ -51,11 +51,11 @@ fake_rootfs() {
 
 # --- distfeeds-config.sh ----------------------------------------------------
 
-tree="$(fake_tree good packages luci routing telephony video mosdns daeuniverse vantage)"
+tree="$(fake_tree good packages luci routing telephony video mosdns vantage)"
 if out="$(bash "$here/distfeeds-config.sh" "$tree")"; then
-	expected=$'CONFIG_FEED_video=m\nCONFIG_FEED_mosdns=m\nCONFIG_FEED_daeuniverse=m\nCONFIG_FEED_vantage=m'
+	expected=$'CONFIG_FEED_video=m\nCONFIG_FEED_mosdns=m\nCONFIG_FEED_vantage=m'
 	if [[ "$out" == "$expected" ]]; then
-		pass "distfeeds-config: 4 unhosted feeds set to =m"
+		pass "distfeeds-config: 3 unhosted feeds set to =m"
 	else
 		fail "distfeeds-config: unexpected output:"$'\n'"$out"
 	fi
@@ -64,7 +64,7 @@ else
 fi
 
 if out="$(DISTFEEDS_HOSTED='packages luci routing telephony video' bash "$here/distfeeds-config.sh" "$tree")" &&
-	[[ "$(grep -c '=m$' <<<"$out")" == 3 ]] && ! grep -q video <<<"$out"; then
+	[[ "$(grep -c '=m$' <<<"$out")" == 2 ]] && ! grep -q video <<<"$out"; then
 	pass "distfeeds-config: DISTFEEDS_HOSTED override"
 else
 	fail "distfeeds-config: DISTFEEDS_HOSTED override not honoured"

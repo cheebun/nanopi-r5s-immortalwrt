@@ -37,9 +37,9 @@ a SHA, checks that it got it; the commit and kernel version go to the job summar
 ## master branch caveats
 
 - **Snapshot, not a release.** master moves daily. The feeds in `feeds.conf.default` are not
-  pinned, and neither are the mosdns and daeuniverse feeds (only the vantage theme feed is
+  pinned, and neither is the mosdns feed (only the vantage theme feed is
   pinned, to its v1.2.0 commit). Every build records the exact commits of the
-  main tree, every feed and honk's sources in `feeds.lock.txt` (also copied into
+  main tree and every feed in `feeds.lock.txt` (also copied into
   `build-info.txt`). `feeds.lock.txt` is a valid `feeds.conf`: copy it over
   `<tree>/feeds.conf` after `install-overlay.sh` to rebuild the same feeds.
 - **No LuCI by default.** Release branches add `DEFAULT_PACKAGES.tweak` (LuCI, autocore,
@@ -66,8 +66,9 @@ a SHA, checks that it got it; the commit and kernel version go to the job summar
 - `mount-utils` (util-linux `mount`, `umount`, `findmnt`, ...).
 - Kernel BTF debug info and netkit.
 - OpenSSL with the built-in devcrypto engine (`kmod-cryptodev`).
-- What honk needs at runtime: `kmod-sched-core`, `kmod-sched-bpf`, `kmod-nft-core`,
-  `kmod-nf-conntrack`, `libstdcpp`, kprobes/BPF events, ftrace.
+- What honk needs at runtime (honk itself is not built, see [honk](#honk)): `kmod-sched-core`,
+  `kmod-sched-bpf`, `kmod-nft-core`, `kmod-nf-conntrack`, `libstdcpp`, `flock`,
+  `coreutils-timeout`, kprobes/BPF events, ftrace.
 - The release "tweak" packages listed above.
 
 **Removed**
@@ -80,9 +81,6 @@ a SHA, checks that it got it; the commit and kernel version go to the job summar
 - `luci-app-attendedsysupgrade` / `owut`: an attended sysupgrade would install a stock image.
 - Argon (`luci-theme-argon`, `luci-app-argon-config`): replaced by Vantage. It is not in the
   master image anyway; CI fails if it is selected or in the image.
-
-**Built but not in the image:** honk, `luci-app-honk`, `luci-lib-daeuniverse` and
-`vmlinux-btf-builtin`, as `.apk` files in a separate artifact.
 
 ## Spec to Kconfig mapping
 
@@ -98,7 +96,7 @@ Every symbol was checked against the master tree and its feeds (2026-11-24).
 | chrony | `PACKAGE_chrony`, `luci-app-chrony`, `luci-i18n-chrony-zh-cn`, `# PACKAGE_chrony-nts is not set` | packages / luci feeds. |
 | No busybox ntpd / sysntpd | `BUSYBOX_CUSTOM=y`, `# BUSYBOX_CONFIG_NTPD is not set`, `# BUSYBOX_CONFIG_FEATURE_NTPD_SERVER is not set` | Without `BUSYBOX_CUSTOM` the NTPD switch has no effect. |
 | DNS | `PACKAGE_dnsmasq-full`, `# PACKAGE_dnsmasq is not set`, `mosdns`, `luci-app-mosdns`, `luci-i18n-mosdns-zh-cn`, `geo2txt`, `v2ray-geoip`, `v2ray-geosite` | mosdns, its LuCI app and geo2txt from the sbwml feed; the geodata from the packages feed. |
-| honk apks | `PACKAGE_honk=m`, `luci-app-honk=m`, `vmlinux-btf-builtin=m` | daeuniverse feed. `luci-lib-daeuniverse` follows as `=m`. |
+| honk: userspace deps | `PACKAGE_libstdcpp`, `flock`, `coreutils-timeout` | honk is installed separately; `flock` (util-linux) and `coreutils-timeout` are deps of `luci-lib-daeuniverse`. |
 | honk: TC/TCX | `PACKAGE_kmod-sched-core` (`NET_SCHED=y`, `NET_CLS_ACT=y`, which selects `NET_XGRESS`), `kmod-sched-bpf` | |
 | honk: cgroup/netns | `KERNEL_CGROUPS`, `KERNEL_CGROUP_BPF`, `KERNEL_NAMESPACES`, `KERNEL_NET_NS` | Upstream defaults, pinned here. |
 | honk/dae: tracing | `KERNEL_BPF_EVENTS`, `KERNEL_KPROBES`, `KERNEL_KPROBE_EVENTS`, `KERNEL_FUNCTION_TRACER`, `KERNEL_DYNAMIC_FTRACE` | ftrace is optional for honk (native-api UDP fallback). |
@@ -181,42 +179,27 @@ if they are.
 
 ## honk
 
-honk (daeuniverse) needs Linux 6.12+, raw BTF (`/sys/kernel/btf/vmlinux`), cgroup v2 +
-`CGROUP_BPF`, `NET_CLS_ACT`/`NET_XGRESS`, netns, and nftables NFQUEUE. netkit is optional.
+honk (daeuniverse) is **not built here**. Install it on the router from daeuniverse's
+official releases: <https://github.com/daeuniverse/openwrt-packages/releases>.
 
-The daeuniverse feed's prebuilt honk targets the 25.12 SDK and may not install on a master
-snapshot (libstdc++ / apk ABI, `vmlinux-btf`). This build therefore compiles honk itself
-from the daeuniverse source feed (`src-git daeuniverse
-https://github.com/daeuniverse/openwrt-packages.git;main`) against this tree:
+The official builds target ImmortalWrt 25.12.x (kernel 6.12). This firmware is master
+(kernel 6.18), so test-install honk before relying on it. Everything honk needs at runtime
+is in the image, because official kmods do not match this kernel:
 
-- `honk`, `luci-app-honk` and `vmlinux-btf-builtin` are `=m`: they become `.apk` files in
-  the `r5s-honk-apks-*` artifact and are **not** in the image. CI fails if any of them is
-  `=y` or appears in the image manifest or rootfs.
-- `prepare-feeds.sh` clones honk's sources (the tag the feed's Makefile names) into
-  `feeds/daeuniverse/honk/src` and uninstalls the feed's `vmlinux-btf` (it needs a prebuilt
-  blob); `vmlinux-btf-builtin` provides `vmlinux-btf` instead. CI installs the Rust
-  toolchains honk pins and its pinned `bpf-linker`.
-- Every kmod honk depends on (`kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core
-  kmod-nft-queue kmod-nfnetlink-queue kmod-nf-conntrack`) is built into the image, because
-  official kmods do not match this kernel. `libstdcpp`, `v2ray-geoip` and `v2ray-geosite`
-  are in the image too.
-- The honk packages build with `IGNORE_ERRORS=m`: a honk build failure does not stop the
-  firmware, but the "Verify honk packages" step then fails the run.
+- Kernel: BTF built in (`/sys/kernel/btf/vmlinux`), BPF syscall/JIT, netkit, cgroup BPF,
+  TCX, XDP sockets, kprobes/ftrace (see the mapping table above).
+- Packages: `kmod-veth kmod-sched-core kmod-sched-bpf kmod-nft-core kmod-nft-queue
+  kmod-nfnetlink-queue kmod-nf-conntrack libstdcpp v2ray-geoip v2ray-geosite`, plus `flock`
+  and `coreutils-timeout` for `luci-lib-daeuniverse`, so the LuCI app installs offline.
 
-After flashing, copy the apks from the **same run's** artifact to the router and install
-them:
+The official honk package also depends on `vmlinux-btf`, which this image does not ship
+(BTF is built into the kernel). Check how that dependency is met when test-installing.
 
-```sh
-apk add ./vmlinux-btf-builtin-*.apk ./honk-*.apk \
-  ./luci-lib-daeuniverse-*.apk ./luci-app-honk-*.apk
-# optional: ./luci-i18n-daeuniverse-zh-cn-*.apk
-```
-
-Each apk is signed with the key generated for that build (`CONFIG_SIGN_EACH_PACKAGE`), and
-the image of the same run carries its public key in `/etc/apk/keys/`. Apks from another run
-need `--allow-untrusted`, and their kmod dependencies only match if the kernel is identical.
-Then configure `/etc/honk/config.dae` (or LuCI -> Services -> honk), set
-`uci set honk.config.enabled=1 && uci commit honk` and start `/etc/init.d/honk`.
+`scripts/check-config.sh` keeps this list as `HONK_RUNTIME_REQUIRED` (and the kernel options
+as `HONK_RUNTIME_KERNEL_Y`), and fails if any honk package (`honk`, `luci-app-honk`,
+`luci-lib-daeuniverse`, `vmlinux-btf`, `vmlinux-btf-builtin`) is selected or in the image,
+if a `honk*.apk` was built, or if a `daeuniverse` feed exists. Run
+`bash scripts/test-check-config.sh` (offline; CI runs it too) after changing the script.
 
 ## Configuration
 
@@ -224,20 +207,21 @@ Then configure `/etc/honk/config.dae` (or LuCI -> Services -> honk), set
 options (ccache, build logs). Later fragments win, one line per key. Then `make defconfig`
 fills in the rest. `scripts/check-config.sh` enforces the spec twice:
 
-1. After `make defconfig`: the required symbols and packages are `=y`, honk is exactly `=m`,
-   no removed package is `=y`/`=m`, and (`--tree`) mosdns, honk and Vantage are installed
-   from the right feeds.
+1. After `make defconfig`: the required symbols and packages (including honk's runtime deps)
+   are `=y`, no removed or honk package is `=y`/`=m`, and (`--tree`) mosdns and Vantage are
+   installed from the right feeds and there is no daeuniverse feed.
 2. After the build: the kernel `.config` has every BPF/BTF/netkit/NFQUEUE option, `vmlinux`
-   carries a `.BTF` section, the image manifest has the required packages and none of the
-   removed or honk ones, and the rootfs has no `sysntpd` / `ntpd` / honk / Argon, has the
-   chrony servers, sbwml's mosdns files, the GPU row files and the Vantage theme files.
+   carries a `.BTF` section, no `honk*.apk` was built, the image manifest has the required
+   packages and none of the removed or honk ones, and the rootfs has no `sysntpd` / `ntpd` /
+   honk / Argon, has the chrony servers, sbwml's mosdns files, the GPU row files and the
+   Vantage theme files.
 
 ## apk repositories
 
 With `CONFIG_PER_FEED_REPO` (the default), base-files writes one line per feed to
 `/etc/apk/repositories.d/distfeeds.list`, but the ImmortalWrt download server hosts only
 `packages`, `luci`, `routing` and `telephony` (plus the target and `base` repositories);
-`video`, `mosdns`, `daeuniverse` and `vantage` are 404 and would break `apk update`.
+`video`, `mosdns` and `vantage` are 404 and would break `apk update`.
 `scripts/distfeeds-config.sh` prints `CONFIG_FEED_<name>=m` for every feed not in
 `DISTFEEDS_HOSTED` (default `packages luci routing telephony`), which makes upstream write
 that line commented out. CI merges it before `make defconfig` and checks that it survived.
@@ -254,18 +238,16 @@ GitHub-hosted runner:
 
 1. GitHub-hosted: frees runner disk space and builds on the larger of `/` and `/mnt`.
    Self-hosted: checks free disk and starts the build container.
-2. Installs the build dependencies, `dwarves`, and clang/LLVM for honk.
+2. Installs the build dependencies and `dwarves`.
 3. Fetches ImmortalWrt at the chosen repo and ref (default: the pinned `base` commit of our
    fork, see [Source tree](#source-tree)) and installs the overlay.
-4. Runs `scripts/prepare-feeds.sh` (feeds update/install, mosdns, vmlinux-btf, honk sources,
-   vantage, `feeds.lock.txt`), installs honk's Rust toolchains, then runs the feed-patch tests and
-   `apply-feed-patches.sh` (strict).
+4. Runs `scripts/prepare-feeds.sh` (feeds update/install, mosdns, vantage,
+   `feeds.lock.txt`), then runs the feed-patch tests and `apply-feed-patches.sh` (strict).
 5. Configures and checks (see above, and the apk repositories), runs `make download`, then
-   `make world IGNORE_ERRORS=m`. On failure it retries the failed package once with `V=s`.
+   `make world`. On failure it retries the failed package once with `V=s`.
 6. Verifies the outputs (including `check-distfeeds.sh`) and uploads the sysupgrade images, manifest, `*.buildinfo`,
    `sha256sums`, `profiles.json`, `diffconfig`, `feeds.lock.txt`, `build.log` and
-   `build-info.txt`; the honk apks go to their own artifact. The full packages artifact is
-   optional.
+   `build-info.txt`. The full packages artifact is optional.
 
 On GitHub-hosted runners `dl/` and ccache are cached with `actions/cache/restore` and `actions/cache/save`. ccache is
 saved even when the build fails; `dl/` (key prefix `dl-v2-`) is saved only when "Build
@@ -304,9 +286,7 @@ The build job runs on a self-hosted Linux x86_64 runner with the labels
 
 ## Local build
 
-Linux x86_64, about 60 GB free, build dependencies as listed in the ImmortalWrt README,
-plus rustup with the toolchains in `feeds/daeuniverse/honk/src/rust-toolchain.toml` and
-`crates/honk-ebpf/rust-toolchain.toml` and `bpf-linker` (see the workflow) for honk.
+Linux x86_64, about 60 GB free, build dependencies as listed in the ImmortalWrt README.
 
 ```sh
 bash scripts/fetch-immortalwrt.sh cheebun/immortalwrt d3a7aaedf7c0763584c9958d5dbee31380bc0d74 immortalwrt
@@ -319,7 +299,7 @@ bash ../scripts/compose-config.sh .config ../r5s.config distfeeds.config
 make defconfig
 bash ../scripts/check-config.sh --config .config --tree .
 make download -j8
-make -j"$(nproc)" world IGNORE_ERRORS=m
+make -j"$(nproc)" world
 ```
 
 ## Feed patches
@@ -336,7 +316,7 @@ row. Run `bash scripts/test-apply-feed-patches.sh` after changing the apply scri
   provides)
 - honk kernel requirements: <https://github.com/daeuniverse/honk/blob/main/doc/en/how-to-start.md>
 - honk OpenWrt packages: <https://github.com/daeuniverse/openwrt-packages> (`honk/Makefile`,
-  `honk/build.sh`, `vmlinux-btf-builtin/Makefile`, `.github/workflows/build-vmlinux-btf.yml`)
+  `luci-lib-daeuniverse/Makefile` for the package deps; releases for the install)
 - mosdns feed: <https://github.com/sbwml/luci-app-mosdns/tree/v5>
 - Vantage feed: <https://github.com/anothaDev/luci-theme-vantage> (v1.2.0,
   `a7ff63b715bca51effb5ab2d488dfff6cff1b16a`)

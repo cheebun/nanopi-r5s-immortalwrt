@@ -8,7 +8,8 @@
 #
 #   --config         The top-level .config after `make defconfig` (required).
 #   --tree           The ImmortalWrt tree: checks which feed each package is
-#                    installed from (package/feeds/<feed>/<package>).
+#                    installed from (package/feeds/<feed>/<package>), that no
+#                    daeuniverse feed exists and that no honk apk was built.
 #   --kernel-config  The kernel .config from build_dir/.../linux-*/.config.
 #   --manifest       An image manifest ("name - version" per line).
 #   --rootfs         The staged root filesystem (build_dir/.../root-rockchip).
@@ -17,7 +18,8 @@
 # met, so the seed config proves nothing; this checks what was actually
 # resolved and built. Every failure is reported before exiting non-zero.
 #
-# Keep the lists below in sync with r5s.config.
+# Keep the lists below in sync with r5s.config. scripts/test-check-config.sh
+# runs this script against fake inputs.
 
 set -Eeuo pipefail
 
@@ -34,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 	--kernel-config) kernel_config="${2:?}"; shift 2 ;;
 	--manifest) manifests+=("${2:?}"); shift 2 ;;
 	--rootfs) rootfs="${2:?}"; shift 2 ;;
-	-h | --help) sed -n '2,21p' "$0"; exit 0 ;;
+	-h | --help) sed -n '2,23p' "$0"; exit 0 ;;
 	*) echo "check-config: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -95,8 +97,7 @@ required_pkgs=(
 	luci-app-mosdns
 	luci-i18n-mosdns-zh-cn
 	geo2txt
-	v2ray-geoip
-	v2ray-geosite
+	# v2ray-geoip, v2ray-geosite: in HONK_RUNTIME_REQUIRED
 	# LuCI theme: Vantage (vantage feed), Bootstrap as the fallback
 	luci-theme-vantage
 	luci-i18n-vantage-theme-zh-cn
@@ -106,17 +107,40 @@ required_pkgs=(
 	luci-i18n-vantage-traffic-zh-cn
 	luci-theme-bootstrap
 	mount-utils
-	kmod-veth
-	kmod-nft-queue
-	kmod-nfnetlink-queue
+	# kmod-veth, kmod-nft-queue, kmod-nfnetlink-queue: in HONK_RUNTIME_REQUIRED
 	kmod-xdp-sockets-diag
+	kmod-cryptodev
+	libopenssl-conf
+)
+
+# honk is NOT built here: it is installed separately on the router, from
+# daeuniverse's official releases. Everything it needs at runtime must be
+# built into the image (=y and in the manifest), because official kmods do
+# not match this kernel. Package deps of honk and luci-app-honk
+# (luci-lib-daeuniverse needs flock and coreutils-timeout).
+HONK_RUNTIME_REQUIRED=(
+	libstdcpp
+	kmod-veth
 	kmod-sched-core
 	kmod-sched-bpf
 	kmod-nft-core
+	kmod-nft-queue
+	kmod-nfnetlink-queue
 	kmod-nf-conntrack
-	kmod-cryptodev
-	libopenssl-conf
-	libstdcpp
+	v2ray-geoip
+	v2ray-geosite
+	flock
+	coreutils-timeout
+)
+# Kernel options honk needs (=y in the final kernel .config); vmlinux must
+# also carry a .BTF section (checked by the workflow with readelf).
+HONK_RUNTIME_KERNEL_Y=(
+	CONFIG_DEBUG_INFO_BTF
+	CONFIG_BPF_SYSCALL
+	CONFIG_BPF_JIT
+	CONFIG_NETKIT
+	CONFIG_CGROUP_BPF
+	CONFIG_SYSFS
 )
 
 # Symbols that must not be =y.
@@ -127,16 +151,9 @@ forbidden_y=(
 	CONFIG_PACKAGE_dnsmasq
 )
 
-# Packages that must be built as installable .apk files but stay out of the
-# image: exactly =m.
-module_pkgs=(
-	honk
-	luci-app-honk
-	vmlinux-btf-builtin
-)
-
-# Never in the image (=y) nor in a manifest; =m is fine. Extended regex,
-# matched against the whole package name.
+# honk and its daeuniverse packages: installed separately, so neither in the
+# image nor built here (=y or =m), nor in a manifest. Extended regex, matched
+# against the whole package name.
 not_in_image_re='(honk|luci-app-honk|luci-lib-daeuniverse|luci-i18n-daeuniverse-.*|luci-i18n-honk-.*|vmlinux-btf|vmlinux-btf-builtin)'
 
 # Removed packages: neither in the image (=y) nor built as a package (=m).
@@ -160,18 +177,18 @@ done
 for pkg in "${required_pkgs[@]}"; do
 	has_line "CONFIG_PACKAGE_$pkg=y" "$config" || err "$config: CONFIG_PACKAGE_$pkg=y is missing (must be built into the image)"
 done
+for pkg in "${HONK_RUNTIME_REQUIRED[@]}"; do
+	has_line "CONFIG_PACKAGE_$pkg=y" "$config" || err "$config: CONFIG_PACKAGE_$pkg=y is missing (honk runtime dependency)"
+done
 for sym in "${forbidden_y[@]}"; do
 	if has_line "$sym=y" "$config"; then err "$config: $sym=y must not be set"; fi
 done
 while IFS= read -r line; do
 	err "$config: removed package is selected: $line"
 done < <(grep -E "^CONFIG_PACKAGE_${forbidden_pkg_re}=[ym]$" "$config" || true)
-for pkg in "${module_pkgs[@]}"; do
-	has_line "CONFIG_PACKAGE_$pkg=m" "$config" || err "$config: CONFIG_PACKAGE_$pkg=m is missing (built as .apk, not in the image)"
-done
 while IFS= read -r line; do
-	err "$config: must not be in the image: $line"
-done < <(grep -E "^CONFIG_PACKAGE_${not_in_image_re}=y$" "$config" || true)
+	err "$config: honk is installed separately, must not be built: $line"
+done < <(grep -E "^CONFIG_PACKAGE_${not_in_image_re}=[ym]$" "$config" || true)
 
 # --- Feed sources -----------------------------------------------------------
 
@@ -179,7 +196,6 @@ if [[ -n "$tree" ]]; then
 	[[ -d "$tree/package/feeds" ]] || { echo "check-config: no package/feeds in $tree" >&2; exit 2; }
 	# package:feed it must be installed from, and from no other feed.
 	for spec in mosdns:mosdns luci-app-mosdns:mosdns geo2txt:mosdns \
-		honk:daeuniverse luci-app-honk:daeuniverse vmlinux-btf-builtin:daeuniverse \
 		luci-theme-vantage:vantage luci-app-vantage:vantage luci-app-vantage-traffic:vantage; do
 		pkg="${spec%%:*}"
 		feed="${spec#*:}"
@@ -191,11 +207,15 @@ if [[ -n "$tree" ]]; then
 			fi
 		done
 	done
-	for other in "$tree"/package/feeds/*/vmlinux-btf; do
-		if [[ -e "$other" ]]; then err "tree: ${other#"$tree"/} is installed (needs a prebuilt blob)"; fi
+	# honk is installed separately; nothing of daeuniverse is built here.
+	for path in feeds/daeuniverse package/feeds/daeuniverse; do
+		if [[ -e "$tree/$path" || -L "$tree/$path" ]]; then err "tree: $path exists (honk is not built here)"; fi
 	done
-	[[ -f "$tree/feeds/daeuniverse/honk/src/Cargo.toml" ]] ||
-		err "tree: honk sources are missing (feeds/daeuniverse/honk/src)"
+	if [[ -d "$tree/bin/packages" ]]; then
+		while IFS= read -r apk; do
+			err "tree: ${apk#"$tree"/} was built (honk is not built here)"
+		done < <(find "$tree/bin/packages" -name 'honk*.apk' 2>/dev/null)
+	fi
 fi
 
 # --- Kernel .config ---------------------------------------------------------
@@ -203,10 +223,12 @@ fi
 if [[ -n "$kernel_config" ]]; then
 	need_file "$kernel_config"
 	kernel_y=(
-		CONFIG_BPF CONFIG_BPF_SYSCALL CONFIG_BPF_JIT CONFIG_BPF_EVENTS
-		CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES
-		CONFIG_NETKIT CONFIG_XDP_SOCKETS
-		CONFIG_CGROUPS CONFIG_CGROUP_BPF CONFIG_NET_NS
+		# plus HONK_RUNTIME_KERNEL_Y
+		"${HONK_RUNTIME_KERNEL_Y[@]}"
+		CONFIG_BPF CONFIG_BPF_EVENTS
+		CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF_MODULES
+		CONFIG_XDP_SOCKETS
+		CONFIG_CGROUPS CONFIG_NET_NS
 		CONFIG_NET_SCHED CONFIG_NET_CLS_ACT CONFIG_NET_XGRESS
 		CONFIG_NET_INGRESS CONFIG_NET_EGRESS
 		CONFIG_KPROBES CONFIG_KPROBE_EVENTS
@@ -236,7 +258,7 @@ for manifest in ${manifests[@]+"${manifests[@]}"}; do
 	need_file "$manifest"
 	names="$(sed -n 's/^\([^ ]*\) - .*/\1/p' "$manifest")"
 	[[ -n "$names" ]] || { err "$manifest: no packages parsed"; continue; }
-	for pkg in "${required_pkgs[@]}"; do
+	for pkg in "${required_pkgs[@]}" "${HONK_RUNTIME_REQUIRED[@]}"; do
 		# apk package names carry the ABI version (libstdcpp -> libstdcpp6).
 		grep -qxE -- "${pkg}[0-9.]*" <<<"$names" || err "$manifest: required package $pkg is not in the image"
 	done
@@ -244,7 +266,7 @@ for manifest in ${manifests[@]+"${manifests[@]}"}; do
 		err "$manifest: removed package is in the image: $pkg"
 	done < <(grep -xE -- "$forbidden_pkg_re" <<<"$names" || true)
 	while IFS= read -r pkg; do
-		err "$manifest: $pkg must not be in the image (installable .apk only)"
+		err "$manifest: $pkg must not be in the image (honk is installed separately)"
 	done < <(grep -xE -- "$not_in_image_re" <<<"$names" || true)
 done
 
